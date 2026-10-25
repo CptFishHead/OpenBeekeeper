@@ -69,6 +69,16 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(lua.globals().databaseSlots[1].individual.ident, 'keep.original')
         self.assertIsNone(lua.globals().databaseSlots[2])
 
+    def test_existing_data_directory_does_not_get_created_again(self):
+        text, _, lua=self.run_binding('''
+          stateFiles['/home/.openbeekeeper-data']='DIRECTORY'
+          require('filesystem').makeDirectory=function(path)
+            error('file or directory with that name already exists')
+          end
+        ''')
+        self.assertIn('Saved 8 module bindings', text)
+        self.assertEqual(lua.globals().stores, 1)
+
     def test_existing_request_blocks_without_mutation(self):
         text, _, lua=self.run_binding('configs[5][2]={size=1}')
         self.assertIn('existing requests', text)

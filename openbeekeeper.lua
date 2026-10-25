@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.6.0: scalable module discovery and interface binding.
+-- OpenBeekeeper 0.6.1: scalable module discovery and interface binding.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -357,7 +357,9 @@ local function bindModules(recover)
     if db then break end
   end
   assert(db,"No free OC database entry")
-  assert(fs.makeDirectory("/home/.openbeekeeper-data"))
+  if not fs.exists("/home/.openbeekeeper-data") then
+    assert(fs.makeDirectory("/home/.openbeekeeper-data"))
+  end
   local rows={"OpenBeekeeper-modules-1"}
   local used={}
   local ok,err=pcall(function()
@@ -427,7 +429,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.6.0 - read-only discovery")
+  print("OpenBeekeeper 0.6.1 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
