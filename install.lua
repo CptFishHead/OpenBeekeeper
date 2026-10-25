@@ -163,7 +163,10 @@ local function install()
   directory(root); directory(data)
   local stage=unique(work,"stage-")
   print("Downloading release manifest...")
-  download(base.."main/package.manifest",stage.."/package.manifest")
+  -- Branch URLs can be cached after a release. Only the mutable manifest
+  -- needs a fresh URL; payload files remain pinned to an immutable commit.
+  local fresh=tostring(math.floor(computer.uptime()*1000))
+  download(base.."main/package.manifest?fresh="..fresh,stage.."/package.manifest")
   local manifestText=assert(read(stage.."/package.manifest"))
   local manifest=parse(manifestText)
   if action=="update" and read(target("package.manifest"))==manifestText then

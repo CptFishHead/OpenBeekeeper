@@ -61,7 +61,9 @@ package.preload.shell=function() return {execute=function(command)
   assert(url and path,'unexpected shell command')
   requests[#requests+1]=url
   if url==failURL then return false end
-  local content=remote[url]; if not content then return false end
+  local clean=url:match('^([^?]+)')
+  local content=(url:find('?',1,true) and freshManifest) or remote[url] or remote[clean]
+  if not content then return false end
   files[path]=content; return true
 end} end
 '''
@@ -111,6 +113,13 @@ class InstallerTests(unittest.TestCase):
         urls = list(self.lua.globals().requests.values())
         self.assertEqual(len(urls), 6)
         self.assertTrue(all("/" + "a" * 40 + "/" in url for url in urls[1:]))
+
+    def test_manifest_request_bypasses_stale_branch_cache(self):
+        self.lua.globals().freshManifest = self.lua.globals().remote[BASE + "main/package.manifest"]
+        self.lua.globals().remote[BASE + "main/package.manifest"] = "stale cached response"
+        self.assertTrue(self.run_manager())
+        first_url = list(self.lua.globals().requests.values())[0]
+        self.assertIn("main/package.manifest?fresh=", first_url)
 
     def test_update_skips_unchanged_healthy_release(self):
         self.assertTrue(self.run_manager())
