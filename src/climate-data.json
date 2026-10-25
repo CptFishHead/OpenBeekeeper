@@ -1,0 +1,702 @@
+{
+  "extrabees.species.abyss": [
+    "HELLISH",
+    "ARID"
+  ],
+  "extrabees.species.acidic": [
+    "WARM",
+    "DAMP"
+  ],
+  "extrabees.species.alcohol": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.ancient": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.arid": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.artic": [
+    "ICY",
+    "NORMAL"
+  ],
+  "extrabees.species.barren": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.basalt": [
+    "HELLISH",
+    "ARID"
+  ],
+  "extrabees.species.bauxite": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.black": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.blooming": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.blue": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.blutonium": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.boggy": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.bone": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.brown": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.caustic": [
+    "WARM",
+    "DAMP"
+  ],
+  "extrabees.species.celebratory": [
+    "ICY",
+    "NORMAL"
+  ],
+  "extrabees.species.cinnabar": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.classical": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.coal": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.coffee": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.copper": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.corrosive": [
+    "WARM",
+    "DAMP"
+  ],
+  "extrabees.species.creeper": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.creosote": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.cyan": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.cyanite": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.darkened": [
+    "HELLISH",
+    "ARID"
+  ],
+  "extrabees.species.decomposing": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.desolate": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.diamond": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.distilled": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.ecstatic": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.emerald": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.energetic": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.excited": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.farm": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.freezing": [
+    "ICY",
+    "NORMAL"
+  ],
+  "extrabees.species.fruit": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.fuel": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.fungal": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.glowstone": [
+    "HELLISH",
+    "ARID"
+  ],
+  "extrabees.species.glutinous": [
+    "WARM",
+    "DAMP"
+  ],
+  "extrabees.species.gnawing": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.gold": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.granite": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.gray": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.greek": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.green": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.growing": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.hazardous": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.infectious": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.ink": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "extrabees.species.iron": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.jaded": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.lapis": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.latex": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.lead": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.lightblue": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.lightgray": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.limegreen": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.magenta": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.malicious": [
+    "WARM",
+    "DAMP"
+  ],
+  "extrabees.species.marble": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.milk": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.mineral": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.mystical": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.nickel": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.nuclear": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.ocean": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "extrabees.species.oil": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.orange": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.pink": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.platinum": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.prehistoric": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.primeval": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.purple": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.pyrite": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.quantum": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.radioactive": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.red": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.relic": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.resin": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.ripening": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.river": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "extrabees.species.rock": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.roman": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.rotten": [
+    "HOT",
+    "ARID"
+  ],
+  "extrabees.species.ruby": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.sapphire": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.shadow": [
+    "HELLISH",
+    "ARID"
+  ],
+  "extrabees.species.silver": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.sodalite": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.spatial": [
+    "COLD",
+    "NORMAL"
+  ],
+  "extrabees.species.sphalerite": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.sticky": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.stone": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.sugar": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.swamp": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "extrabees.species.sweet": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.tempered": [
+    "HELLISH",
+    "ARID"
+  ],
+  "extrabees.species.thriving": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.tin": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.titanium": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.tungstate": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.unstable": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.unusual": [
+    "COLD",
+    "NORMAL"
+  ],
+  "extrabees.species.virulent": [
+    "WARM",
+    "DAMP"
+  ],
+  "extrabees.species.viscous": [
+    "WARM",
+    "DAMP"
+  ],
+  "extrabees.species.volcanic": [
+    "HELLISH",
+    "ARID"
+  ],
+  "extrabees.species.water": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "extrabees.species.white": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.yellorium": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.yellow": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "extrabees.species.zinc": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesAgrarian": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesAustere": [
+    "HOT",
+    "ARID"
+  ],
+  "forestry.speciesAvenging": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesBoggy": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "forestry.speciesCommon": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesCultivated": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesDemonic": [
+    "HELLISH",
+    "ARID"
+  ],
+  "forestry.speciesDiligent": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesEdenic": [
+    "WARM",
+    "DAMP"
+  ],
+  "forestry.speciesEnded": [
+    "COLD",
+    "NORMAL"
+  ],
+  "forestry.speciesExotic": [
+    "WARM",
+    "DAMP"
+  ],
+  "forestry.speciesFarmerly": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesFiendish": [
+    "HELLISH",
+    "ARID"
+  ],
+  "forestry.speciesForest": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesFrugal": [
+    "HOT",
+    "ARID"
+  ],
+  "forestry.speciesGlacial": [
+    "ICY",
+    "NORMAL"
+  ],
+  "forestry.speciesHermitic": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesHeroic": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesIcy": [
+    "ICY",
+    "NORMAL"
+  ],
+  "forestry.speciesImperial": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesIndustrious": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesLeporine": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesMajestic": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesMarshy": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "forestry.speciesMeadows": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesMerry": [
+    "ICY",
+    "NORMAL"
+  ],
+  "forestry.speciesMiry": [
+    "NORMAL",
+    "DAMP"
+  ],
+  "forestry.speciesModest": [
+    "HOT",
+    "ARID"
+  ],
+  "forestry.speciesMonastic": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesNoble": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesPhantasmal": [
+    "COLD",
+    "NORMAL"
+  ],
+  "forestry.speciesRural": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesSecluded": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesSinister": [
+    "HELLISH",
+    "ARID"
+  ],
+  "forestry.speciesSpectral": [
+    "COLD",
+    "NORMAL"
+  ],
+  "forestry.speciesSteadfast": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesTipsy": [
+    "ICY",
+    "NORMAL"
+  ],
+  "forestry.speciesTricky": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesTropical": [
+    "WARM",
+    "DAMP"
+  ],
+  "forestry.speciesUnweary": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesValiant": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesVengeful": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesVindictive": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "forestry.speciesWintry": [
+    "ICY",
+    "NORMAL"
+  ],
+  "gendustry.bee.blue": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.brown": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.cyan": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.gray": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.green": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.lightblue": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.lime": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.magenta": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.orange": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.pink": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.purple": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.red": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.silver": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.white": [
+    "NORMAL",
+    "NORMAL"
+  ],
+  "gendustry.bee.yellow": [
+    "NORMAL",
+    "NORMAL"
+  ]
+}

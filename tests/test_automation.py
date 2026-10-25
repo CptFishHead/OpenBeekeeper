@@ -13,8 +13,10 @@ local function descriptor(v)
  local x=clone(v); if x then x._nbt=nil end; return x
 end
 local serial=require('serialization'); local oldSerialize=serial.serialize
+local oldUnserialize=serial.unserialize
+serial.unserialize=function(text) return clone(oldUnserialize(text)) end
 serial.serialize=function(v)
- if v.schema=='AUTO1' then serialNumber=serialNumber+1; local key='AUTO:'..serialNumber; serialValues[key]=clone(v); return key end
+ if v.schema=='AUTO1' or v.schema=='CLIMATE1' then serialNumber=serialNumber+1; local key='AUTO:'..serialNumber; serialValues[key]=clone(v); return key end
  return oldSerialize(v)
 end
 local originalBee=beeStack
@@ -125,19 +127,62 @@ for n=1,8 do
   return true
  end
 end
+-- A separate incubator module, never used for prepared-parent reproduction.
+apiaries[9]={}; bins[9]={}; configurations[9]={}
+for side=2,5 do apiaries[9][side]={[3]={name='gendustry:apiary_upgrade',label='Plains Emulation Upgrade',size=1,damage=17}} end
+devices.t9={kind='transposer',
+ getInventoryName=function(side) if side==1 then return 'appliedenergistics2:interface' elseif side>=2 and side<=5 then return 'gendustry:industrial_apiary' end return nil,'no inventory' end,
+ getStackInSlot=function(side,slot) if side==1 then return descriptor(bins[9][slot]) end return descriptor(apiaries[9][side] and apiaries[9][side][slot]) end,
+ store=function(side,slot,address,index) dbSlots[index]=clone(apiaries[9][side][slot]); return true end,
+ compareStackToDatabase=function(side,slot,address,index,nbt) return bins[9][slot] and bins[9][slot]._nbt==dbSlots[index]._nbt end,
+ transferItem=function(from,to,count,slot,destination)
+  if from==1 then
+   local v=assert(bins[9][slot]); assert(v.name:find('queen'),'INCUBATOR RECEIVED A MATING PARENT')
+   assert(v.individual.isAnalyzed,'QUEEN WAS NOT ANALYZED')
+   apiaries[9][to][destination]=clone(v); bins[9][slot]=nil
+   loaded[#loaded+1]={module=9,side=to,slot=destination,uid=v.individual.ident}; return count
+  end
+  local v=assert(apiaries[9][from][slot]); assert(slot>=7 and count==v.size)
+  if v.individual then add(v.individual.ident,v.name:find('princess') and 'princess' or 'drone',count) end
+  apiaries[9][from][slot]=nil; return count
+ end}
+devices.if9={kind='me_interface',store=store,getItemsInNetwork=function() error('WRONG ENDPOINT') end,
+ getInterfaceConfiguration=function(slot) return configurations[9][slot] end,
+ setInterfaceConfiguration=function(slot,address,index,count)
+  if not address then
+   local v=bins[9][slot]
+   if v then add(v.individual.ident,'queen',v.size); bins[9][slot]=nil end
+   configurations[9][slot]=nil; return true
+  end
+  local v=clone(dbSlots[index]); v.size=count
+  local source=assert(stock[v.individual.ident..':queen']); assert(source.size>=count)
+  source.size=source.size-count; bins[9][slot]=v; configurations[9][slot]=clone(v); return true
+ end}
+binding=binding..'interface t9 1 if9\n'
+for side=2,5 do binding=binding..'machine t9 '..side..' gendustry:industrial_apiary\n' end
+stateFiles['/home/.openbeekeeper-data/modules']=binding
+local climate={schema='CLIMATE1',roles={},manual={},species={}}
+for module=1,4 do for side=2,5 do climate.roles['t'..module..':'..side]='breeding' end end
+for _,uid in ipairs({'a','b','c','d','goal','side','conditional'}) do climate.species[uid]={'NORMAL','NORMAL'} end
+stateFiles['/home/.openbeekeeper-data/climate']=serial.serialize(climate)
 devices.catalogue={kind='bee_housing',
  listAllSpecies=function() return {{uid='a',name='a'},{uid='b',name='b'},{uid='goal',name='goal'},{uid='side',name='side'},{uid='conditional',name='conditional'}} end,
  getBeeBreedingData=function() return {
   {allele1='a',allele2='b',result='goal',chance=10,specialConditions=onlyConditional and {'Night'} or {}},
-  {allele1='a',allele2='b',result='conditional',chance=99,specialConditions={'Nether'}}} end}
+  includeConditional and {allele1='a',allele2='b',result='conditional',chance=99,specialConditions={'Nether'}} or {}} end}
 local basePull=require('event').pull
 require('event').pull=function(seconds)
  local ret=basePull(seconds); if ret=='interrupted' then return ret end
  for n,p in pairs(processors) do
   local kind=types[n]
+  local inSlot,outSlot
+  if kind=='analyzer' then
+   for slot=3,8 do if p[slot] then inSlot=slot; break end end
+   for slot=9,12 do if not p[slot] then outSlot=slot; break end end
+  end
   if not stallProcessor or stallProcessor~=kind then
-   if kind=='analyzer' and p[3] and not p[9] and not noHoney then
-    p[9]=clone(p[3]); p[9].individual.isAnalyzed=true; p[9]._nbt='analyzed|'..p[9]._nbt; p[3]=nil
+   if kind=='analyzer' and inSlot and outSlot and not noHoney then
+    p[outSlot]=clone(p[inSlot]); p[outSlot].individual.isAnalyzed=true; p[outSlot]._nbt='analyzed|'..p[outSlot]._nbt; p[inSlot]=nil
    elseif kind=='imprinter' and p[3] and not p[4] and p[2] and p[2].size>0 then
     assert(p[3].individual.isAnalyzed,'IMPRINT BEFORE ANALYSIS')
     p[4]=clone(p[3]); p[4]._nbt='imprinted|'..p[4]._nbt
@@ -197,10 +242,10 @@ class AutomationTests(unittest.TestCase):
         self.assertGreaterEqual(lua.globals().stock['side:drone'].size, 3)
         self.assertIsNone(lua.globals().stock['goal:drone'])
 
-    def test_conditional_recipes_are_not_dispatched(self):
+    def test_conditional_recipes_are_dispatched_as_unverified_attempts(self):
         text, _, lua=self.execute("onlyConditional=true; add('a','princess',2); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=30")
-        self.assertEqual(list(lua.globals().observedMutations.values()), [])
-        self.assertNotIn('FLOW mutate', text)
+        self.assertTrue(list(lua.globals().observedMutations.values()))
+        self.assertIn('CONDITIONAL ATTEMPT goal Night requirements are not verified by OC',text)
 
     def test_roulette_is_retried_after_side_species_is_preserved(self):
         text, _, lua=self.execute("add('a','princess',6); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); stock.lab={name='gendustry:labware',label='Genetics Labware',size=1000}; interruptAt=900")
@@ -344,9 +389,101 @@ class AutomationTests(unittest.TestCase):
         self.assertTrue(refs)
         self.assertEqual(lua.globals().dbSlots[1].name,'keep')
 
+    def test_all_six_analyzer_inputs_are_used(self):
+        _, _, lua=self.execute("for _,uid in ipairs({'a','b','c','d','e','f'}) do add(uid,'princess',1); add(uid,'drone',31); stock['gene:'..uid]=sample(uid) end; stallProcessor='analyzer'; interruptAt=3")
+        self.assertEqual(sum(lua.globals().processors[5][slot] is not None for slot in range(3,9)),6)
+
+    def test_several_princesses_of_same_species_can_fill_multiple_apiaries(self):
+        _, _, lua=self.execute("add('a','princess',12); add('a','drone',20); stock.ga=sample('a'); stall=true; interruptAt=120")
+        jobs=[v for v in lua.globals().loaded.values() if v.slot==1]
+        self.assertEqual(len(jobs),4)
+        self.assertEqual({v.module for v in jobs},{1,2,3,4})
+
+    def test_reservations_do_not_duplicate_a_single_princess(self):
+        _, _, lua=self.execute("add('a','princess',1); add('a','drone',20); stock.ga=sample('a'); stall=true; interruptAt=90")
+        self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),1)
+
+    def test_genome_unknown_to_climate_catalog_waits_after_queen_analysis(self):
+        code="""
+          add('unmapped','queen',1); interruptAt=35
+        """
+        text, _, lua=self.execute(code)
+        self.assertIn('Unknown preferred climate for unmapped',text)
+        self.assertTrue(any(v.kind=='analyzer' and v.uid=='unmapped' for v in lua.globals().visits.values()))
+        self.assertEqual(len(list(lua.globals().loaded.values())),0)
+
+    def test_incompatible_incubator_is_not_used(self):
+        code="""
+          add('a','queen',1); interruptAt=35
+          local c=require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/climate'])
+          c.species.a={'HOT','ARID'}
+          stateFiles['/home/.openbeekeeper-data/climate']=require('serialization').serialize(c)
+        """
+        text, _, lua=self.execute(code)
+        self.assertIn('No free incubator zone HOT/ARID',text)
+        self.assertEqual(len(list(lua.globals().loaded.values())),0)
+
+    def test_heater_dryer_are_included_in_zone_climate(self):
+        code="""
+          add('a','queen',1); interruptAt=30
+          local c=require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/climate']); c.species.a={'HOT','ARID'}
+          stateFiles['/home/.openbeekeeper-data/climate']=require('serialization').serialize(c)
+          for side=2,5 do
+            apiaries[9][side][4]={name='gendustry:apiary_upgrade',label='Heater Upgrade',size=1}
+            apiaries[9][side][5]={name='gendustry:apiary_upgrade',label='Dryer Upgrade',size=1}
+          end
+        """
+        text, _, lua=self.execute(code)
+        self.assertTrue(any(v.module==9 for v in lua.globals().loaded.values()))
+
+    def test_zone_command_explicitly_assigns_native_breeding_pool(self):
+        lua=runtime.LuaRuntime(unpack_returned_tuples=True); lua.execute(runtime.HARNESS); lua.execute(FULL)
+        lua.eval('function(src) return assert(load(src))("zones","breeding","native") end')(runtime.SOURCE)
+        c=lua.eval('require("serialization").unserialize')(lua.globals().stateFiles['/home/.openbeekeeper-data/climate'])
+        self.assertEqual(len(list(c.roles.items())),16)
+        self.assertIsNone(c.roles['t9:2'])
+
+    def test_sixteen_breeding_apiaries_can_be_used_without_two_bee_cap(self):
+        code="""
+          for i=1,16 do local uid='species'..i; add(uid,'princess',1); add(uid,'drone',20); stock['gene:'..uid]=sample(uid) end
+          stall=true; interruptAt=350
+        """
+        _, _, lua=self.execute(code)
+        parents=[v for v in lua.globals().loaded.values() if v.slot==1]
+        self.assertEqual(len(parents),16)
+        self.assertEqual({v.module for v in parents},{1,2,3,4})
+
+    def test_emulators_are_automatically_classified_as_incubators(self):
+        lua=runtime.LuaRuntime(unpack_returned_tuples=True); lua.execute(runtime.HARNESS); lua.execute(FULL)
+        lua.eval('function(src) return assert(load(src))("zones") end')(runtime.SOURCE)
+        text='\n'.join(v.text for v in lua.globals().lines.values())
+        self.assertIn('incubator plains NORMAL NORMAL t9:2',text)
+
+    def test_old_single_flow_queen_is_migrated_through_analyzer(self):
+        code="""
+          add('a','queen',1); interruptAt=40
+          local old={schema='AUTO1',refs={},apiaries={},seq=0,cycles=0,samples=0,mutations=0,migrated=true,
+            flow={mode='queen',target='a',step=1,steps={'queen'},pendingP=beeStack('a','queen',1)}}
+          stateFiles['/home/.openbeekeeper-data/automation']=require('serialization').serialize(old)
+        """
+        text, _, lua=self.execute(code)
+        self.assertTrue(any(v.kind=='analyzer' and v.uid=='a' for v in lua.globals().visits.values()))
+        self.assertTrue(any(v.module==9 for v in lua.globals().loaded.values()))
+
+    def test_six_input_queue_resumes_without_duplicate_parents(self):
+        code="""
+          for _,uid in ipairs({'a','b','c','d','e','f'}) do add(uid,'princess',1); add(uid,'drone',31); stock['gene:'..uid]=sample(uid) end
+          stall=true; stallProcessor='analyzer'; interruptAt=3
+        """
+        _, _, lua=self.execute(code)
+        lua.execute("stallProcessor=nil; interruptAt=clock+180")
+        lua.eval('function(src) return assert(load(src))("auto") end')(runtime.SOURCE)
+        self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),6)
+        self.assertEqual(len([v for v in lua.globals().visits.values() if v.kind=='analyzer']),12)
+
     def test_embedded_runtime_matches_maintained_source(self):
-        root=Path(__file__).resolve().parents[1]
-        maintained=(root/'src/automation.lua').read_text(encoding='utf-8')
+        from tools.embed_automation import build_body
+        maintained=build_body()
         body=runtime.SOURCE.split('-- BEGIN EMBEDDED AUTOMATION\n',1)[1].split('-- END EMBEDDED AUTOMATION\n',1)[0]
         self.assertEqual(body, maintained)
 

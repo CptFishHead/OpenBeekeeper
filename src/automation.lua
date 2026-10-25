@@ -16,9 +16,12 @@ local function automate()
   end
   local raw=readText(path..".new") or readText(path)
   local st=raw and parse(raw,"AUTO1") or {schema="AUTO1",refs={},apiaries={},seq=0,cycles=0,samples=0,mutations=0}
+  st.flows=st.flows or {}
+  if st.flow then st.seq=st.seq+1; st.flows[tostring(st.seq)]=st.flow; st.flow=nil end
+  local flow,currentID
   if args[2]=="status" then
     print("AUTOMATION: apiary cycles="..st.cycles.."; sampled drones="..st.samples.."; mutations="..st.mutations)
-    if st.flow then print("FLOW",st.flow.mode,st.flow.target,"step="..st.flow.step) end
+    for id,f in pairs(st.flows) do print("FLOW",id,f.mode,f.target,"step="..f.step) end
     for key,job in pairs(st.apiaries) do print("APIARY",key,job.uid) end
     print(st.wait or "No resource wait recorded."); return true
   end
@@ -84,8 +87,13 @@ local function automate()
     if kind=='apiary' then return 7,15 elseif kind=='analyzer' then return 9,12
     elseif kind=='mutatron' then return 3,3 else return 4,4 end
   end
+  local waiting={}
   local function warn(message)
-    if st.wait~=message then st.wait=message; print("WAIT "..message); save() end
+    local key=currentID or 'global'
+    if waiting[key]~=message then
+      waiting[key]=message; st.wait=message; if flow then flow.wait=message end
+      print("WAIT "..message); save()
+    end
   end
   local function tick()
     assert(event.pull(1)~="interrupted","Paused by Ctrl+C; bees auto resumes")
@@ -213,11 +221,18 @@ local function automate()
     elseif m.kind=='mutatron' then return fluidReady(m) and resource(m,4,'Genetics Labware') end
     return true
   end
+  local availability,zoneCache={},{}
   local function free(m)
     if st.apiaries[m.key] then return false end
+    for id,f in pairs(st.flows) do if id~=currentID and f.op and f.op.key==m.key then return false end end
+    if m.kind=='apiary' and availability[m.key]~=nil then return availability[m.key] end
     local lo,hi=outputSlots(m.kind)
     for slot=lo,hi do if alive(item(m,slot)) then return false end end
-    if m.kind=='apiary' or m.kind=='mutatron' then return not alive(item(m,1)) and not alive(item(m,2)) end
+    if m.kind=='apiary' or m.kind=='mutatron' then
+      local result=not alive(item(m,1)) and not alive(item(m,2))
+      if m.kind=='apiary' then availability[m.key]=result end
+      return result
+    end
     if m.kind=='analyzer' then
       if alive(item(m,1)) then return false end
       for slot=3,8 do if alive(item(m,slot)) then return false end end
@@ -225,21 +240,42 @@ local function automate()
     end
     return not alive(item(m,3))
   end
-  local function find(kind)
+  local function find(kind,wanted,purpose)
     local best,score
+    local configuration=kind=='apiary' and climateConfiguration()
+    local requiredT,requiredH
+    if purpose=='incubator' then requiredT,requiredH=preferredClimate(wanted and wanted.uid,configuration) end
+    if purpose=='incubator' and not requiredT then return nil,nil,'Unknown preferred climate for '..tostring(wanted and wanted.uid)..'; use bees zones species <UID> <TEMP> <HUMIDITY>' end
     for _,m in ipairs(groups[kind]) do
-      if free(m) and emptyBuffer(m.module) then
-        local climate=0
-        if kind=='apiary' then
-          for slot=3,6 do
-            local v=item(m,slot)
-            if alive(v) and (v.label=='Light Upgrade' or v.label=='Seal Upgrade') then climate=climate+1 end
+      local roleMatches=true
+      if kind=='apiary' then
+        local cache=zoneCache[m.key]
+        local epoch=math.floor(computer.uptime()/5)
+        if not cache or cache.epoch~=epoch then cache={epoch=epoch,value=climateOfApiary(m.module.t,m.side)}; zoneCache[m.key]=cache end
+        local zone=climateZone(m,configuration,cache.value)
+        roleMatches=zone.role==purpose and (purpose=='breeding' or (zone.temperature==requiredT and zone.humidity==requiredH))
+      end
+      if kind=='analyzer' and emptyBuffer(m.module) then
+        local owned,duplicate,reserved=false,false,{}
+        for id,f in pairs(st.flows) do
+          if id~=currentID and f.op and f.op.key==m.key then
+            owned=true
+            for _,feed in ipairs(f.op.feeds) do
+              local ref=st.refs[feed.ref]
+              if ref and wanted and ref.uid==wanted.uid and ref.kind==wanted.kind then duplicate=true end
+              if not feed.loaded then reserved[feed.slot]=true end
+            end
           end
         end
+        if not duplicate and (owned or free(m)) then
+          for slot=3,8 do if not reserved[slot] and not alive(item(m,slot)) then return m,slot end end
+        end
+      elseif kind~='analyzer' and roleMatches and free(m) and emptyBuffer(m.module) then
+        local climate=kind=='apiary' and zoneCache[m.key].value.score or 0
         if not best or climate>score then best=m; score=climate end
       end
     end
-    return best
+    return best,nil,kind=='apiary' and ('No free '..tostring(purpose)..' zone'..(requiredT and ' '..requiredT..'/'..requiredH or '')..'; inspect bees zones') or nil
   end
   local function returnSlot(m,slot)
     local v=item(m,slot); if not alive(v) then return true end
@@ -260,8 +296,9 @@ local function automate()
     end
   end
   local function finishFlow()
-    local f=assert(st.flow)
-    st.flow=nil; st.needFresh=true; save()
+    local f=assert(flow)
+    waiting[currentID]=nil
+    st.flows[currentID]=nil; flow=nil; st.needFresh=true; save()
     release(f.p); release(f.d)
   end
   local function copyOutput(m,slot,id)
@@ -269,7 +306,7 @@ local function automate()
     assert(call(m.module.t.store,m.side,slot,r.database,r.slot),"Cannot copy exact output descriptor")
   end
   local function serviceFlow()
-    local f=st.flow; if not f then return end
+    local f=flow; if not f then return end
     if f.pendingP then f.p=reference(f.pendingP); f.pendingP=nil; save() end
     if f.pendingD then f.d=reference(f.pendingD); f.pendingD=nil; save() end
     for _,id in ipairs({f.p or false,f.d or false}) do if id then materialize(id) end end
@@ -278,15 +315,23 @@ local function automate()
     local kind=step:match('^analyze') and 'analyzer' or step:match('^imprint') and 'imprinter'
       or step=='sample' and 'sampler' or step=='mate' and (f.mode=='mutate' and 'mutatron' or 'apiary') or 'apiary'
     if not f.op then
-      local m=find(kind)
-      if not m then warn("No empty "..kind); return end
+      local wanted=st.refs[(step=='queen' or step:sub(-1)=='P') and f.p or f.d]
+      local purpose=kind=='apiary' and (step=='queen' and 'incubator' or 'breeding') or nil
+      if purpose=='breeding' then
+        assert(st.refs[f.p].analyzed and st.refs[f.p].imprinted and st.refs[f.d].analyzed and st.refs[f.d].imprinted,'Both breeding parents must be analyzed and imprinted')
+      elseif purpose=='incubator' then assert(wanted and wanted.analyzed,'Queen must pass analyzer before climate routing') end
+      local m,analysisSlot,reason=find(kind,wanted,purpose)
+      if not m then warn(reason or "No empty "..kind); return end
       if not supplies(m) then return end
       local feeds={}
       if step=='mate' then
         feeds={{ref=f.d,slot=2},{ref=f.p,slot=1}}
       elseif step=='queen' then feeds={{ref=f.p,slot=1}}
-      else feeds={{ref=step:sub(-1)=='P' and f.p or f.d,slot=3}} end
-      f.op={key=m.key,feeds=feeds,phase='feeding',ticks=0}; st.wait=nil; save()
+      else feeds={{ref=step:sub(-1)=='P' and f.p or f.d,slot=analysisSlot or 3}} end
+      f.op={key=m.key,feeds=feeds,phase='feeding',ticks=0}; f.wait=nil; waiting[currentID]=nil; st.wait=nil; save()
+      if kind=='mutatron' and f.conditions and #f.conditions>0 then
+        print('CONDITIONAL ATTEMPT',f.target,table.concat(f.conditions,'; '),'requirements are not verified by OC; server decides availability')
+      end
     end
     local op=f.op; local m=assert(machines[op.key],"Saved processor is missing")
     if op.phase=='feeding' then
@@ -311,7 +356,7 @@ local function automate()
     end
     if kind=='apiary' then
       if not op.handed then
-        st.apiaries[m.key]={uid=st.refs[f.p].uid,target=f.target,puid=st.refs[f.p].uid,duid=f.d and st.refs[f.d].uid}
+        st.apiaries[m.key]={uid=st.refs[f.p].uid,target=f.target,puid=st.refs[f.p].uid,duid=f.d and st.refs[f.d].uid,fertility=st.refs[f.p].fertility}
         op.handed=true; save()
       end
       finishFlow(); return
@@ -324,6 +369,8 @@ local function automate()
           local uid,k=bee(v)
           local failed=v.name=='gendustry:waste' and (kind=='imprinter' or kind=='mutatron')
           local id=step:sub(-1)=='P' and f.p or f.d
+          local expected=id and st.refs[id]
+          if kind~='analyzer' or (expected and uid==expected.uid and k==expected.kind) then
           if failed then id=nil
           elseif kind=='mutatron' then
             assert(k=='queen' and type(uid)=='string',"Mutatron output is not an identifiable queen")
@@ -335,20 +382,34 @@ local function automate()
           end
           op.capture={slot=slot,ref=not failed and kind~='sampler' and id or nil,uid=uid,kind=k,label=v.label,name=v.name,tagGene=gene(v),failed=failed}; save()
           break
+          end
         end
       end
     end
     if op.capture then
       local capture=op.capture
-      if alive(item(m,capture.slot)) then
-        if capture.ref then copyOutput(m,capture.slot,capture.ref) end
-        if not returnSlot(m,capture.slot) then return end
+      local physical=item(m,capture.slot)
+      if alive(physical) then
+        local uid,k=bee(physical)
+        local same=capture.ref and uid==capture.uid and k==capture.kind
+          or not capture.ref and physical.name==capture.name and physical.label==capture.label
+        if same then
+          if capture.ref then copyOutput(m,capture.slot,capture.ref); capture.copied=true; save() end
+          if not returnSlot(m,capture.slot) then return end
+        else
+          assert(capture.copied,'Owned output changed before capture completed')
+        end
       end
       if capture.ref then
         local r=st.refs[capture.ref]; local v=call(db(r).get,r.slot)
         local uid,k=bee(v or {})
         assert(uid==capture.uid and k==capture.kind,"Captured output descriptor missing")
         r.uid=uid; r.kind=k; r.filter=nil; r.ready=true; save()
+        local active=type(v.individual)=='table' and v.individual.active
+        local fertility=type(active)=='table' and tonumber(active.fertility)
+        if fertility and fertility>=1 and fertility<=64 then r.fertility=fertility; save() end
+        if kind=='analyzer' then r.analyzed=true; save()
+        elseif kind=='imprinter' then r.analyzed=true; r.imprinted=true; save() end
       end
       if capture.failed then
         if not capture.applied then st.losses=(st.losses or 0)+1; capture.applied=true; save() end
@@ -357,7 +418,7 @@ local function automate()
       elseif kind=='mutatron' then
         st.mutations=st.mutations+1
         print("MUTATION RESULT",capture.uid,"wanted",f.target,capture.uid==f.target and 'MATCH' or 'SIDE SPECIES SAVED')
-        local oldDrone=f.d; f.d=nil; f.mode='queen'; f.steps={'queen'}; f.step=1; f.op=nil; save(); release(oldDrone)
+        local oldDrone=f.d; f.d=nil; f.mode='queen'; f.steps={'analyzeP','queen'}; f.step=1; f.op=nil; save(); release(oldDrone)
       elseif kind=='sampler' then
         if not capture.applied then
           st.samples=st.samples+1; capture.applied=true; save()
@@ -396,32 +457,56 @@ local function automate()
     end
     return stock,samples
   end
-  local function start(mode,target,p,d)
+  local function start(mode,target,p,d,conditions)
     local f={mode=mode,target=target,step=1,steps=mode=='sample' and {'analyzeD','imprintD','sample'}
-      or mode=='queen' and {'queen'} or {'analyzeP','imprintP','analyzeD','imprintD','mate'}}
-    f.pendingP=p; f.pendingD=d; st.flow=f; st.wait=nil; save()
-    st.needFresh=true; save(); print("FLOW",mode,target)
+      or mode=='queen' and {'analyzeP','queen'} or {'analyzeP','imprintP','analyzeD','imprintD','mate'}}
+    f.pendingP=p; f.pendingD=d; f.conditions=conditions; st.seq=st.seq+1; st.flows[tostring(st.seq)]=f; st.wait=nil; save(); print("FLOW",mode,target)
   end
   local function choose(stock,samples)
-    local busy={}
+    local incoming,predicted,load={},{},{}
     for _,j in pairs(st.apiaries) do
-      if not j.orphan then busy[j.uid]=true; if j.puid then busy[j.puid]=true end; if j.duid then busy[j.duid]=true end end
+      if not j.orphan then
+        incoming[j.uid]=true; if j.target then incoming[j.target]=true end
+        predicted[j.uid]=(predicted[j.uid] or 0)+(j.fertility or 4)
+        load[j.uid]=(load[j.uid] or 0)+1
+      end
     end
+    local available={}
+    for uid,e in pairs(stock) do local c={}; for k,v in pairs(e) do c[k]=v end; c.stockDrone=e.drone; available[uid]=c end
+    for _,f in pairs(st.flows) do
+      incoming[f.target]=true; load[f.target]=(load[f.target] or 0)+1
+      for _,role in ipairs({'p','d'}) do
+        local r=f[role] and st.refs[f[role]]
+        local pending=f[role=='p' and 'pendingP' or 'pendingD']
+        local uid,k
+        if r then uid,k=r.uid,r.kind elseif pending then uid,k=bee(pending) end
+        if uid and available[uid] then available[uid][k]=math.max(0,available[uid][k]-1) end
+      end
+      if f.mode=='multiply' or f.mode=='queen' then
+        local r=f.p and st.refs[f.p]
+        local fertility=r and r.fertility or 4
+        predicted[f.target]=(predicted[f.target] or 0)+(f.mode=='queen' and fertility or math.max(0,fertility-1))
+      end
+    end
+    stock=available
     local list={}; for _,e in pairs(stock) do list[#list+1]=e end
-    table.sort(list,function(a,b) return a.uid<b.uid end)
-    local function idle(e) return e and not busy[e.uid] end
+    table.sort(list,function(a,b)
+      if (load[a.uid] or 0)~=(load[b.uid] or 0) then return (load[a.uid] or 0)<(load[b.uid] or 0) end
+      return a.uid<b.uid
+    end)
+    local function idle(e) return e~=nil end
     local function target(e) return samples[e.uid] and DRONE_TARGET or DRONE_TARGET+38 end
     for _,e in ipairs(list) do
-      if idle(e) and e.queenItem and (e.drone<target(e) or e.princess==0) then start('queen',e.uid,e.queenItem); return true end
+      if e.queen>0 and (e.stockDrone+(predicted[e.uid] or 0)<target(e) or e.princess==0) then start('queen',e.uid,e.queenItem); return true end
     end
     for _,e in ipairs(list) do
-      if idle(e) and e.princess>0 and e.drone>0 and e.drone<target(e) then start('multiply',e.uid,e.princessItem,e.droneItem); return true end
+      if e.princess>0 and e.drone>0 and e.stockDrone+(predicted[e.uid] or 0)<target(e) then start('multiply',e.uid,e.princessItem,e.droneItem); return true end
     end
     for _,e in ipairs(list) do
       if idle(e) and not samples[e.uid] and e.drone>DRONE_TARGET then start('sample',e.uid,nil,e.droneItem); return true end
     end
     for _,e in ipairs(list) do
-      if idle(e) and (e.drone<DRONE_TARGET or not samples[e.uid]) then
+      if not incoming[e.uid] and (e.drone<DRONE_TARGET or not samples[e.uid]) then
         if e.princess==0 and e.queen==0 and e.drone>=1 then
           for _,base in ipairs(list) do
             if idle(base) and base.uid~=e.uid and base.princess>0 and (base.princess>1 or base.drone>=DRONE_TARGET) then
@@ -439,12 +524,16 @@ local function automate()
     local candidates={}
     local function resolve(value) return names[value] and value or aliases[value] end
     for _,recipe in pairs(recipes) do
-      if type(recipe)=='table' and not hasConditions(recipe) then
+      if type(recipe)=='table' then
         local a,b,result=resolve(recipe.allele1),resolve(recipe.allele2),resolve(recipe.result)
-        if a and b and result and not samples[result] and (not stock[result] or stock[result].princess==0) then
+        if a and b and result and not incoming[result] and not samples[result] and (not stock[result] or stock[result].princess==0) then
           local function pair(p,d)
             if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and (p.drone>0 or p.princess>1) then
-              candidates[#candidates+1]={p=p,d=d,result=result}
+              local conditions={}
+              if type(recipe.specialConditions)=='table' then for _,v in pairs(recipe.specialConditions) do conditions[#conditions+1]=tostring(v) end
+              elseif hasConditions(recipe) then conditions[1]=tostring(recipe.specialConditions) end
+              table.sort(conditions)
+              candidates[#candidates+1]={p=p,d=d,result=result,conditions=conditions}
             end
           end
           pair(stock[a],stock[b]); if a~=b then pair(stock[b],stock[a]) end
@@ -455,7 +544,7 @@ local function automate()
     -- Round robin prevents an unlucky common side result starving other branches.
     if #candidates>0 then
       st.recipeCursor=(st.recipeCursor or 0)%#candidates+1
-      local c=candidates[st.recipeCursor]; start('mutate',c.result,c.p.princessItem,c.d.droneItem); return true
+      local c=candidates[st.recipeCursor]; start('mutate',c.result,c.p.princessItem,c.d.droneItem,c.conditions); return true
     end
     return false
   end
@@ -488,9 +577,26 @@ local function automate()
   end
   local function perform()
     cleanLease(); migrate()
+    if not st.climateRouting then
+      for _,f in pairs(st.flows) do
+        for index,step in ipairs(f.steps) do
+          if index<f.step then
+            local id=step:sub(-1)=='P' and f.p or f.d; local r=id and st.refs[id]
+            if r and step:match('^analyze') then r.analyzed=true end
+            if r and step:match('^imprint') then r.analyzed=true; r.imprinted=true end
+          end
+        end
+        if f.mode=='queen' and f.steps[f.step]=='queen' then
+          local loaded=false
+          if f.op then for _,feed in ipairs(f.op.feeds) do if feed.loaded or feed.armed then loaded=true end end end
+          if not loaded then f.steps={'analyzeP','queen'}; f.step=1; f.op=nil end
+        end
+      end
+      st.climateRouting=true; save()
+    end
     if st.resource then release(st.resource); st.resource=nil; save() end
     local used={}
-    if st.flow then if st.flow.p then used[st.flow.p]=true end; if st.flow.d then used[st.flow.d]=true end end
+    for _,f in pairs(st.flows) do if f.p then used[f.p]=true end; if f.d then used[f.d]=true end end
     local garbage={}; for id in pairs(st.refs) do if not used[id] then garbage[#garbage+1]=id end end
     for _,id in ipairs(garbage) do release(id) end
     for _,module in pairs(modules) do
@@ -500,18 +606,39 @@ local function automate()
     end
     for key in pairs(st.apiaries) do assert(machines[key],'Owned apiary is missing') end
     save()
-    print('AUTO: analyzer -> imprinter -> apiary/mutatron; reserve 32; species gene chance 7.7%; conditional recipes excluded.')
+    print('AUTO: analyzer -> imprinter -> apiary/mutatron; reserve 32; species gene chance 7.7%; all recipes allowed; server requirements remain enforced.')
     print('Ctrl+C pauses. bees auto resumes. Fluids/power must be supplied to the machines.')
+    local capacity=0
+    for _,e in ipairs(tools.databases) do
+      for slot=1,81 do
+        local v,err=read(e.proxy.get,slot); if err then break end
+        if v==nil then capacity=capacity+1 end
+      end
+    end
+    for _ in pairs(st.refs) do capacity=capacity+1 end
+    local flowLimit=math.max(1,math.min(#groups.apiary,#groups.analyzer*6,math.floor((capacity-1)/2)))
+    print('Preparation capacity:',flowLimit,'flows; analyzer input slots: 6 per machine')
     local nextRead=0; local stock,samples={},{}; local lastSummary=-60
     while true do
+      availability={}
       serviceApiaries()
       if computer.uptime()>=nextRead then
         local items,err=readME(me,true); assert(type(items)=='table',err or 'ME read failed')
         stock,samples=collectStock(items); st.needFresh=false; nextRead=computer.uptime()+ME_INTERVAL
       end
-      if st.flow then serviceFlow()
-      elseif not st.needFresh then
-        if not choose(stock,samples) then warn('No currently available unconditional task; monitoring ME. Some species need parents or a wild source.') end
+      local ids={}; for id in pairs(st.flows) do ids[#ids+1]=id end
+      table.sort(ids,function(a,b) return tonumber(a)<tonumber(b) end)
+      for _,id in ipairs(ids) do currentID=id; flow=st.flows[id]; serviceFlow() end
+      currentID=nil; flow=nil
+      if not st.needFresh then
+        local count=0; for _ in pairs(st.flows) do count=count+1 end
+        while count<flowLimit do
+          if not choose(stock,samples) then
+            if count==0 then warn('No currently available task; monitoring ME. Some species need parents or a wild source.') end
+            break
+          end
+          count=count+1
+        end
       end
       if computer.uptime()-lastSummary>=60 then
         local beesCount,sampleCount,active=0,0,0

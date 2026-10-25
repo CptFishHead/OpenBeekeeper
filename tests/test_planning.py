@@ -75,9 +75,10 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('REVIEW: last princess', text)
         self.assertEqual(lua.globals().catalogueReads, 1)
 
-    def test_conditional_recipe_is_excluded_from_planning(self):
+    def test_conditional_recipe_is_included_with_explicit_conditions(self):
         text, _, _=self.plan("conditional=true; catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',33)})")
-        self.assertNotIn('-> C', text)
+        self.assertIn('-> C', text)
+        self.assertIn('CONDITIONS: During the night.', text)
 
     def test_observed_result_not_presented_as_new_species(self):
         text, _, _=self.plan("catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',2),stack('c','C','drone',1)})")
