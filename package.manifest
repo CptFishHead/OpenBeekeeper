@@ -1,8 +1,8 @@
 OpenBeekeeper-package-1
-revision 636c718f9cabb3427d2a18fbc00c9bda2100ba73
-version 0.3.2
-file openbeekeeper.lua 9425 0e6d4503
+revision 9408da68ff0081d4ba33d50a42fa40af7f3b9a66
+version 0.3.3
+file openbeekeeper.lua 11064 b8965e48
 file install.lua 10225 035b5acd
 file bees.lua 517 3809b865
-file VERSION 6 03d000fc
-file README.md 11613 cea3cea4
+file VERSION 6 03d200fd
+file README.md 12391 6cf0ca30
