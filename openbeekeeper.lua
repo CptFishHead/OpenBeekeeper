@@ -1,11 +1,12 @@
--- OpenBeekeeper 0.3.0: discovery, ME diagnostics, collection preview. Read-only.
+-- OpenBeekeeper 0.3.1: discovery, ME diagnostics, collection preview. Read-only.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
 local sideNames = {[0]="down", "up", "north", "south", "west", "east"}
 
 local function read(method, ...)
-  if type(method)~="function" then return nil,"method unavailable" end
+  -- OpenOS callbacks may be callable proxy objects, not Lua functions.
+  if method==nil then return nil,"method unavailable" end
   local ok,value,reason=pcall(method,...)
   if not ok then return nil,tostring(value) end
   return value,reason
@@ -96,7 +97,7 @@ end
 
 local transposers,networks,catalogues=discover()
 if command=="scan" then
-  print("OpenBeekeeper 0.3.0 - read-only discovery")
+  print("OpenBeekeeper 0.3.1 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")

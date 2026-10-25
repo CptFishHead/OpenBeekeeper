@@ -18,7 +18,17 @@ package.preload.component=function() return {
     local i=0; return function() i=i+1; local k=keys[i]; if k then return k,devices[k].kind end end end,
   methods=function(a) local m={}; for k,v in pairs(devices[a]) do if type(v)=='function' then
     if methodFlags[k]==nil then m[k]=true else m[k]=methodFlags[k] end end end; return m end,
-  proxy=function(a) return devices[a] end,
+  proxy=function(a)
+    if not callableMode then return devices[a] end
+    local p={}
+    for k,v in pairs(devices[a]) do
+      if type(v)=='function' then
+        local callback=v
+        p[k]=setmetatable({}, {__call=function(_,...) return callback(...) end})
+      else p[k]=v end
+    end
+    return p
+  end,
   isAvailable=function(k) return k=='gpu' end, gpu=gpu
 } end
 package.preload.serialization=function() return {serialize=function(v)
@@ -99,6 +109,26 @@ class RuntimeTests(unittest.TestCase):
         """, "catalog")
         self.assertIn("CATALOGUE apiary", text)
         self.assertIn("listAllSpecies: 1 records", text)
+
+    def test_callable_table_catalogue_methods(self):
+        text, _, _ = self.run_script("""
+          callableMode=true
+          devices.apiary={kind='bee_housing',
+            listAllSpecies=function() return {{uid='test.bee',name='Test'}} end,
+            getBeeBreedingData=function() return {} end}
+        """, "catalog")
+        self.assertIn("listAllSpecies: 1 records", text)
+        self.assertNotIn("method unavailable", text)
+
+    def test_callable_table_me_and_transposer_methods(self):
+        text, rows, _ = self.run_script("""
+          callableMode=true
+          worker('worker',5,{drone('forestry.speciesDiligent')})
+          network('me',{sample('forestry.speciesDiligent')})
+        """, "map", "1", "1")
+        matching = [(t, c) for t, c in rows if t.startswith('[B] [G]')]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0][1], 0x55FF55)
 
     def test_probe_includes_bees_without_species_provider(self):
         text, _, _ = self.run_script("""
