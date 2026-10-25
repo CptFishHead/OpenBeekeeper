@@ -19,7 +19,9 @@ end
 package.preload.computer=function() return {
   uptime=function() return clock end,address=function() return 'test-computer' end} end
 package.preload.filesystem=function() return {
-  exists=function(path) return stateFiles[path]~=nil end,makeDirectory=function() return true end} end
+  exists=function(path) return stateFiles[path]~=nil end,makeDirectory=function() return true end,
+  remove=function(path) stateFiles[path]=nil; return true end,
+  rename=function(a,b) stateFiles[b]=stateFiles[a]; stateFiles[a]=nil; return true end} end
 print=function(...)
   local parts={}; for i=1,select('#',...) do parts[i]=tostring(select(i,...)) end
   lines[#lines+1]={text=table.concat(parts,' '),colour=colour}
@@ -226,6 +228,66 @@ class RuntimeTests(unittest.TestCase):
         _, _, lua = self.run_script("network('a',{})", "me")
         self.assertEqual(list(lua.globals().networkCalls.values()), [])
         self.assertEqual(list(lua.globals().sleeps.values()), [])
+
+    def test_saved_roles_survive_changes_in_endpoint_order(self):
+        _, _, lua = self.run_script("""
+          network('a-stock',{}); network('b-transit',{}); network('c-genes',{})
+        """, "setup", "1", "2", "3")
+        lua.execute("network('000-new',{}); lines={}")
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "roles")
+        text = '\n'.join(row.text for row in lua.globals().lines.values())
+        self.assertIn("stock a-stock OK, current number 2", text)
+        self.assertIn("genes c-genes OK, current number 4", text)
+
+    def test_saved_roles_do_not_silently_rebind_missing_network(self):
+        _, _, lua = self.run_script("""
+          network('a-stock',{}); network('b-transit',{}); network('c-genes',{})
+        """, "setup", "1", "2", "3")
+        lua.execute("devices['a-stock']=nil; network('other-stock',{}); lines={}")
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "map")
+        text = '\n'.join(row.text for row in lua.globals().lines.values())
+        self.assertIn("Missing stock endpoint", text)
+        self.assertEqual(list(lua.globals().networkCalls.values()), [])
+
+    def test_duplicate_role_endpoint_is_rejected(self):
+        text, _, lua = self.run_script("network('a',{}); network('b',{})", "setup", "1", "1", "2")
+        self.assertIn("three distinct endpoints", text)
+        self.assertIsNone(lua.globals().stateFiles['/home/.openbeekeeper-data/roles'])
+
+    def test_server_observed_species_sample_label_is_marked_as_label_evidence(self):
+        text, rows, _ = self.run_script("""
+          network('a-stock',{})
+          network('b-genes',{{name='gendustry:gene_sample',size=7,
+            label='Bee Sample - Species: Rocky'}})
+          devices.catalogue={kind='bee_housing',
+            listAllSpecies=function() return {{uid='extrabees.species.rock',name='Rocky'}} end,
+            getBeeBreedingData=function() return {} end}
+        """, "owned", "1", "2")
+        matching = [(t, c) for t, c in rows if t.startswith('[-] [L]')]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0][1], 0x55FF55)
+        self.assertIn("label matches: 1", text)
+        self.assertIn("not NBT verification", text)
+
+    def test_ambiguous_species_label_does_not_mark_either_species(self):
+        text, rows, _ = self.run_script("""
+          network('a-stock',{})
+          network('b-genes',{{name='gendustry:gene_sample',size=1,
+            label='Bee Sample - Species: Duplicate'}})
+          devices.catalogue={kind='bee_housing',
+            listAllSpecies=function() return {{uid='mod.a',name='Duplicate'},{uid='mod.b',name='Duplicate'}} end,
+            getBeeBreedingData=function() return {} end}
+        """, "map", "1", "2")
+        self.assertNotIn("[L]", '\n'.join(t for t, _ in rows if t.startswith('[')))
+        self.assertIn("Unknown/ambiguous sample labels: 1", text)
+
+    def test_readable_nbt_takes_precedence_over_species_display_label(self):
+        _, rows, _ = self.run_script("""
+          local s=sample('forestry.speciesDiligent',1)
+          s.label='Bee Sample - Species: Diligent'
+          network('a-stock',{}); network('b-genes',{s})
+        """, "map", "1", "2")
+        self.assertFalse(any(t.startswith('[-] [L]') or t.startswith('[-] [G]') for t, _ in rows))
 
 
 if __name__ == "__main__":

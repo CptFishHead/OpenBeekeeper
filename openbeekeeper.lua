@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.3.3: discovery, ME diagnostics, collection preview. Read-only.
+-- OpenBeekeeper 0.4.0: saved ME roles and species collection. No item movement.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -76,6 +76,7 @@ local function discover()
     local proxy=read(component.proxy,entry.address)
     if type(methods)=="table" and proxy then
       entry.proxy=proxy
+      entry.methods=methods
       if entry.kind=="transposer" then transposers[#transposers+1]=entry end
       -- Values are the direct-call flag, NOT an availability flag.
       -- false means a synchronized callback exists; only nil means absent.
@@ -118,9 +119,51 @@ end
 
 local function listNetworks(networks)
   print("ME endpoints (multiple endpoints may share ONE network):")
-  for i,e in ipairs(networks) do print(i,e.kind,e.address) end
+  for i,e in ipairs(networks) do
+    print(i,e.kind,e.address,"interface-config="..tostring(e.methods.setInterfaceConfiguration~=nil))
+  end
   if #networks==0 then print("None. Connect an OC adapter to an ME interface.") end
   print("Numbers are temporary. Never use them as saved role bindings.")
+end
+
+local ROLE_PATH="/home/.openbeekeeper-data/roles"
+local roleNames={"stock","transport","genes"}
+local function readText(path)
+  local f=io.open(path,"r"); if not f then return end
+  local text=f:read("*a"); f:close(); return text
+end
+local function writeText(path,text)
+  local f=assert(io.open(path,"w")); assert(f:write(text)); assert(f:flush())
+  local closed,err=f:close(); assert(closed~=false and not err,err or "Cannot save roles")
+end
+local function parseRoles(text)
+  if not text then return end
+  assert(text:match("^OpenBeekeeper%-roles%-1\n"),"Invalid roles header")
+  local result={}
+  for line in text:gmatch("[^\n]+") do
+    if line~="OpenBeekeeper-roles-1" then
+      local role,address=line:match("^(%a+) ([%w%-]+)$")
+      assert((role=="stock" or role=="transport" or role=="genes") and not result[role],"Invalid roles record")
+      result[role]=address
+    end
+  end
+  for _,role in ipairs(roleNames) do assert(result[role],"Missing role: "..role) end
+  assert(result.stock~=result.transport and result.stock~=result.genes and result.genes~=result.transport,
+    "Roles need three distinct endpoints")
+  return result
+end
+local function loadRoles()
+  local text=readText(ROLE_PATH)
+  if not text then text=readText(ROLE_PATH..".bak") end
+  local ok,roles=pcall(parseRoles,text)
+  if not ok then return nil,tostring(roles) end
+  return roles
+end
+local function roleIndex(role,networks)
+  local roles,err=loadRoles()
+  if not roles then return nil,err or "No saved roles. Use bees setup <stock> <transport> <genes>." end
+  for i,entry in ipairs(networks) do if entry.address==roles[role] then return i end end
+  return nil,"Missing "..role.." endpoint. Rebind roles after replacing a component."
 end
 
 -- Gendustry 1.12 GeneSampleInfo: species=root UID, chromosome=0-based, allele=UID.
@@ -136,7 +179,7 @@ end
 
 local transposers,networks,catalogues=discover()
 if command=="scan" then
-  print("OpenBeekeeper 0.3.3 - read-only discovery")
+  print("OpenBeekeeper 0.4.0 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
@@ -144,6 +187,36 @@ if command=="scan" then
   print("Forestry catalogue endpoints: "..#catalogues)
 elseif command=="me" then
   listNetworks(networks)
+elseif command=="setup" then
+  local selection={}
+  for i,role in ipairs(roleNames) do selection[role]=networks[tonumber(args[i+1])] end
+  if not selection.stock or not selection.transport or not selection.genes then
+    listNetworks(networks); print("Use: bees setup <stock number> <transport number> <genes number>"); return false
+  end
+  local text="OpenBeekeeper-roles-1\n"
+  for _,role in ipairs(roleNames) do text=text..role.." "..selection[role].address.."\n" end
+  local ok,err=pcall(function()
+    parseRoles(text)
+    local fs=require("filesystem")
+    if not fs.exists("/home/.openbeekeeper-data") then assert(fs.makeDirectory("/home/.openbeekeeper-data")) end
+    local old=readText(ROLE_PATH)
+    if old then writeText(ROLE_PATH..".bak",old) end
+    writeText(ROLE_PATH..".new",text)
+    assert(readText(ROLE_PATH..".new")==text,"Roles write verification failed")
+    if fs.exists(ROLE_PATH) then assert(fs.remove(ROLE_PATH)) end
+    assert(fs.rename(ROLE_PATH..".new",ROLE_PATH),"Cannot publish roles file")
+  end)
+  if not ok then print("Roles not saved: "..tostring(err)); return false end
+  for _,role in ipairs(roleNames) do print(role.." = "..selection[role].address) end
+  print("Roles saved. Endpoints must belong to physically separate networks.")
+  print("Replacing a component requires rebinding; changing list order does not.")
+elseif command=="roles" then
+  local roles,err=loadRoles()
+  if not roles then print(err or "No saved roles. Use bees setup."); return false end
+  for _,role in ipairs(roleNames) do
+    local index=roleIndex(role,networks)
+    print(role,roles[role],index and ("OK, current number "..index) or "MISSING - rebind required")
+  end
 elseif command=="catalog" then
   if #catalogues==0 then
     print("Connect an OC adapter to a normal Forestry apiary for the catalogue API.")
@@ -164,6 +237,10 @@ elseif command=="catalog" then
   print("listAllSpecies is mutation results, not a proven complete list of every species.")
 elseif command=="probe" then
   local index=tonumber(args[2])
+  if args[2]=="stock" or args[2]=="transport" or args[2]=="genes" then
+    local err; index,err=roleIndex(args[2],networks)
+    if not index then print(err); return false end
+  end
   local entry=index and networks[index]
   if not entry then listNetworks(networks); print("Use: lua openbeekeeper.lua probe <ME number>"); return end
   local items,err=readME(entry)
@@ -181,8 +258,18 @@ elseif command=="probe" then
     end
   end
   if shown==0 then print("Add a bee and a filled bee Gene Sample to this test network.") end
-elseif command=="map" then
+elseif command=="map" or command=="owned" then
   local stockIndex,geneIndex=tonumber(args[2]),tonumber(args[3])
+  if not args[2] then
+    local roles,err=loadRoles()
+    if err then print(err); return false end
+    if roles then
+      stockIndex,err=roleIndex("stock",networks)
+      if not stockIndex then print(err); return false end
+      geneIndex,err=roleIndex("genes",networks)
+      if not geneIndex then print(err); return false end
+    end
+  end
   if (args[2] and not networks[stockIndex]) or (args[3] and not networks[geneIndex]) then
     listNetworks(networks); print("Use: lua openbeekeeper.lua map [stock ME number] [archive ME number]"); return
   end
@@ -205,6 +292,7 @@ elseif command=="map" then
     end
   end
   local archiveReadable=false
+  local unresolved=0
   local function collect(v,source)
     local id=bee(v)
     if type(id)=="string" and id~="" then
@@ -216,6 +304,16 @@ elseif command=="map" then
       if g and g.chromosome==0 then
         known[g.allele]=known[g.allele] or {label=g.allele}
         known[g.allele].gene=true
+      elseif not g and type(v.tag)~="table" and type(v.nbt)~="table"
+          and v.name=="gendustry:gene_sample" then
+        -- Server-observed English display format. UI evidence only; never
+        -- authorize consumption/imprinting from a display-label match.
+        local name=tostring(v.label or ""):match("^Bee Sample %- Species: (.+)$")
+        if name then
+          local matches={}
+          for uid,entry in pairs(known) do if entry.label==name then matches[#matches+1]=uid end end
+          if #matches==1 then known[matches[1]].labelGene=true else unresolved=unresolved+1 end
+        end
       end
     end
   end
@@ -241,17 +339,26 @@ elseif command=="map" then
     print("Common + Cultivated -> Diligent / Noble")
     print("Illustrative branch; server recipe catalogue not loaded.")
   end
-  print("B=bee available; G=verified species sample in selected archive")
-  print("Green=archived gene; cyan=bee only; grey=unconfirmed")
+  print("B=bee; G=NBT-confirmed species sample; L=matched sample label")
+  print("Green=sample present (G/L); cyan=bee only; grey=unconfirmed")
+  local countBees,countGenes,countLabel=0,0,0
   for _,v in ipairs(rows) do
-    if gpu then gpu.setForeground(v.gene and 0x55FF55 or v.bee and 0x55DDFF or 0xAAAAAA) end
-    print(string.format("[%s] [%s] %-16s %s",v.bee and "B" or "-",v.gene and "G" or "?",v.label,v.id))
+    if v.bee then countBees=countBees+1 end
+    if v.gene then countGenes=countGenes+1 elseif v.labelGene then countLabel=countLabel+1 end
+    if command~="owned" or v.bee or v.gene or v.labelGene then
+      if gpu then gpu.setForeground((v.gene or v.labelGene) and 0x55FF55 or v.bee and 0x55DDFF or 0xAAAAAA) end
+      print(string.format("[%s] [%s] %-16s %s",v.bee and "B" or "-",
+        v.gene and "G" or v.labelGene and "L" or "?",v.label,v.id))
+    end
   end
   if gpu then gpu.setForeground(previous) end
   if not archiveReadable then print("Archive not read. No collection completeness claim.") end
-  print("Unreadable sample NBT is UNKNOWN, never green. Preview is not the full species list.")
+  print(string.format("Catalogue: %d | bees: %d | NBT samples: %d | label matches: %d",#rows,countBees,countGenes,countLabel))
+  print("L is display-label evidence, not NBT verification. No automatic actions rely on L.")
+  if unresolved>0 then print("Unknown/ambiguous sample labels: "..unresolved) end
+  print("Preview is not the full species list. Use bees owned for collected entries only.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | catalog | probe <ME number> | map [stock ME number] [archive ME number]")
+  print("Commands: scan | me | setup <stock> <transport> <genes> | roles | catalog | probe <number/role> | map | owned")
 end
 print("Read-only. No items moved.")
