@@ -20,7 +20,8 @@ package.preload.component=function() return {
   proxy=function(a) return devices[a] end,
   isAvailable=function(k) return k=='gpu' end, gpu=gpu
 } end
-package.preload.serialization=function() return {serialize=function(v) return 'SERIALIZED:'..v.name end} end
+package.preload.serialization=function() return {serialize=function(v)
+  return 'SERIALIZED:'..tostring(v.name or v.result or v.uid or 'record') end} end
 function worker(address,side,items)
   devices[address]={kind='transposer',
     getInventorySize=function(s) if s==side then return #items end return nil,'no inventory' end,
@@ -121,6 +122,28 @@ class RuntimeTests(unittest.TestCase):
         text, _, _ = self.run_script("network('a',{})", "map", "20", "30")
         self.assertIn("Use:", text)
         self.assertNotIn("BEE MAP", text)
+
+    def test_catalogue_discovery_uses_methods_without_fixed_address(self):
+        text, _, _ = self.run_script("""
+          devices['replacement-apiary']={kind='bee_housing',
+            listAllSpecies=function() return {{uid='test.species',name='Test'}} end,
+            getBeeBreedingData=function() return {{allele1='A',allele2='B',result='Test'}} end}
+        """, "catalog")
+        self.assertIn("CATALOGUE replacement-apiary", text)
+        self.assertIn("listAllSpecies: 1 records", text)
+        self.assertIn("getBeeBreedingData: 1 records", text)
+        self.assertIn("not a proven complete list", text)
+
+    def test_map_includes_live_catalogue_uid_without_marking_it_collected(self):
+        text, rows, _ = self.run_script("""
+          devices.catalogue={kind='bee_housing',
+            listAllSpecies=function() return {{uid='server.speciesUnknown',name='ServerBee'}} end,
+            getBeeBreedingData=function() return {} end}
+        """, "map")
+        self.assertIn("Live mutation-result catalogue loaded", text)
+        row = [(t, c) for t, c in rows if t.startswith('[-]') and 'server.speciesUnknown' in t]
+        self.assertEqual(len(row), 1)
+        self.assertEqual(row[0][1], 0xAAAAAA)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ local function bee(v)
 end
 
 local function discover()
-  local entries,transposers,networks={},{},{}
+  local entries,transposers,networks,catalogues={},{},{},{}
   for address,kind in component.list() do entries[#entries+1]={address=address,kind=kind} end
   table.sort(entries,function(a,b) return a.address<b.address end)
   for _,entry in ipairs(entries) do
@@ -38,9 +38,10 @@ local function discover()
       entry.proxy=proxy
       if entry.kind=="transposer" then transposers[#transposers+1]=entry end
       if methods.getItemsInNetwork then networks[#networks+1]=entry end
+      if methods.listAllSpecies and methods.getBeeBreedingData then catalogues[#catalogues+1]=entry end
     end
   end
-  return transposers,networks
+  return transposers,networks,catalogues
 end
 
 local function inspect(transposers,visitor,verbose)
@@ -91,15 +92,34 @@ local function gene(v)
   return {root=tag.species,chromosome=chr,allele=tag.allele}
 end
 
-local transposers,networks=discover()
+local transposers,networks,catalogues=discover()
 if command=="scan" then
   print("OpenBeekeeper 0.2 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
   listNetworks(networks)
+  print("Forestry catalogue endpoints: "..#catalogues)
 elseif command=="me" then
   listNetworks(networks)
+elseif command=="catalog" then
+  if #catalogues==0 then
+    print("Connect an OC adapter to a normal Forestry apiary for the catalogue API.")
+  end
+  local serialization=require("serialization")
+  for _,entry in ipairs(catalogues) do
+    print("CATALOGUE "..entry.address)
+    for _,method in ipairs({"listAllSpecies","getBeeBreedingData"}) do
+      local data,err=read(entry.proxy[method])
+      if type(data)=="table" then
+        local count,examples=0,{}
+        for _,v in pairs(data) do count=count+1; if #examples<3 then examples[#examples+1]=v end end
+        print(method..": "..count.." records")
+        for _,v in ipairs(examples) do print(serialization.serialize(v)) end
+      else print(method..": "..tostring(err or "unavailable")) end
+    end
+  end
+  print("listAllSpecies is mutation results, not a proven complete list of every species.")
 elseif command=="probe" then
   local index=tonumber(args[2])
   local entry=index and networks[index]
@@ -130,6 +150,18 @@ elseif command=="map" then
     ["forestry.speciesDiligent"]={label="Diligent"},
     ["forestry.speciesNoble"]={label="Noble"}
   }
+  local catalogRead=false
+  for _,entry in ipairs(catalogues) do
+    local species=read(entry.proxy.listAllSpecies)
+    if type(species)=="table" then
+      catalogRead=true
+      for _,v in pairs(species) do
+        if type(v)=="table" and type(v.uid)=="string" and v.uid~="" then
+          known[v.uid]=known[v.uid] or {label=v.name or v.uid}
+        end
+      end
+    end
+  end
   local archiveReadable=false
   local function collect(v,source)
     local id=bee(v)
@@ -161,8 +193,12 @@ elseif command=="map" then
   local gpu=component.isAvailable("gpu") and component.gpu or nil
   local previous=gpu and gpu.getForeground() or nil
   print("BEE MAP / collection preview")
-  print("Common + Cultivated -> Diligent / Noble")
-  print("Illustrative branch; server recipe catalogue not loaded.")
+  if catalogRead then
+    print("Live mutation-result catalogue loaded; wild species may be absent.")
+  else
+    print("Common + Cultivated -> Diligent / Noble")
+    print("Illustrative branch; server recipe catalogue not loaded.")
+  end
   print("B=bee available; G=verified species sample in selected archive")
   print("Green=archived gene; cyan=bee only; grey=unconfirmed")
   for _,v in ipairs(rows) do
@@ -174,6 +210,6 @@ elseif command=="map" then
   print("Unreadable sample NBT is UNKNOWN, never green. Preview is not the full species list.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | probe <ME number> | map [stock ME number] [archive ME number]")
+  print("Commands: scan | me | catalog | probe <ME number> | map [stock ME number] [archive ME number]")
 end
 print("Read-only. No items moved.")
