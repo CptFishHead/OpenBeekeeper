@@ -1,0 +1,5 @@
+# Local runtime state and logs
+state/
+*.log
+.DS_Store
+Thumbs.db
