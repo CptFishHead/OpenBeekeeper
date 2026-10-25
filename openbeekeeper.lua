@@ -37,8 +37,10 @@ local function discover()
     if type(methods)=="table" and proxy then
       entry.proxy=proxy
       if entry.kind=="transposer" then transposers[#transposers+1]=entry end
-      if methods.getItemsInNetwork then networks[#networks+1]=entry end
-      if methods.listAllSpecies and methods.getBeeBreedingData then catalogues[#catalogues+1]=entry end
+      -- Values are the direct-call flag, NOT an availability flag.
+      -- false means a synchronized callback exists; only nil means absent.
+      if methods.getItemsInNetwork~=nil then networks[#networks+1]=entry end
+      if methods.listAllSpecies~=nil and methods.getBeeBreedingData~=nil then catalogues[#catalogues+1]=entry end
     end
   end
   return transposers,networks,catalogues

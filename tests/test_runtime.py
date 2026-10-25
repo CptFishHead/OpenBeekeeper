@@ -7,7 +7,7 @@ from lupa.lua52 import LuaRuntime
 SOURCE = (Path(__file__).resolve().parents[1] / "openbeekeeper.lua").read_text(encoding="utf-8")
 
 HARNESS = r'''
-devices={}; lines={}; colour=0xFFFFFF
+devices={}; lines={}; methodFlags={}; colour=0xFFFFFF
 print=function(...)
   local parts={}; for i=1,select('#',...) do parts[i]=tostring(select(i,...)) end
   lines[#lines+1]={text=table.concat(parts,' '),colour=colour}
@@ -16,7 +16,8 @@ local gpu={getForeground=function() return colour end,setForeground=function(c) 
 package.preload.component=function() return {
   list=function() local keys={}; for k in pairs(devices) do keys[#keys+1]=k end
     local i=0; return function() i=i+1; local k=keys[i]; if k then return k,devices[k].kind end end end,
-  methods=function(a) local m={}; for k,v in pairs(devices[a]) do if type(v)=='function' then m[k]=true end end; return m end,
+  methods=function(a) local m={}; for k,v in pairs(devices[a]) do if type(v)=='function' then
+    if methodFlags[k]==nil then m[k]=true else m[k]=methodFlags[k] end end end; return m end,
   proxy=function(a) return devices[a] end,
   isAvailable=function(k) return k=='gpu' end, gpu=gpu
 } end
@@ -81,6 +82,23 @@ class RuntimeTests(unittest.TestCase):
         text, _, _ = self.run_script("network('new-random-address',{})", "me")
         self.assertIn("custom_server_me", text)
         self.assertIn("Numbers are temporary", text)
+
+    def test_synchronized_me_method_is_still_available(self):
+        text, _, _ = self.run_script("""
+          methodFlags.getItemsInNetwork=false
+          network('synchronized-me',{})
+        """, "me")
+        self.assertIn("synchronized-me", text)
+
+    def test_synchronized_catalogue_methods_are_still_available(self):
+        text, _, _ = self.run_script("""
+          methodFlags.listAllSpecies=false; methodFlags.getBeeBreedingData=false
+          devices.apiary={kind='bee_housing',
+            listAllSpecies=function() return {{uid='test.bee',name='Test'}} end,
+            getBeeBreedingData=function() return {} end}
+        """, "catalog")
+        self.assertIn("CATALOGUE apiary", text)
+        self.assertIn("listAllSpecies: 1 records", text)
 
     def test_probe_includes_bees_without_species_provider(self):
         text, _, _ = self.run_script("""
