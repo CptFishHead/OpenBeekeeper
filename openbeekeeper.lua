@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.7.1: scalable module discovery and interface binding.
+-- OpenBeekeeper 0.8.0: scalable module discovery and interface binding.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -16,6 +16,7 @@ end
 -- This is a polling cooldown, not cancellation of an in-progress OC callback.
 local ME_INTERVAL=20
 local DRONE_TARGET=32
+local SPECIES_GENE_CHANCE=0.077 -- User-confirmed server probability per donor.
 local snapshots={}
 local function readME(entry,force)
   local ok,value,reason=pcall(function()
@@ -476,6 +477,8 @@ local function collectionPlan()
   table.sort(owned,function(a,b) return a.label<b.label end)
   print("COLLECTION PLAN / read-only; ME stock only (machines excluded)")
   print("P=princesses D=drones Q=queens; drone stock target/reserve: "..DRONE_TARGET.." per species")
+  print(string.format("Species gene chance: %.1f%% per donor; 95%% success needs %d donors above reserve (not a guarantee).",
+    SPECIES_GENE_CHANCE*100,math.ceil(math.log(0.05)/math.log(1-SPECIES_GENE_CHANCE))))
   local ready,breed,blocked=0,0,0
   for _,e in ipairs(owned) do
     local action
@@ -547,7 +550,333 @@ local function collectionPlan()
   if unverified>0 then print("Sample items without structured gene identity: "..unverified..". Label evidence requires review.") end
 end
 
-if command=="plan" then
+-- Same-species reproduction only. Mutation, imprinting and destructive sampling
+-- are deliberately separate jobs; this runner never feeds those machines.
+local function runApiaries()
+  local fs=require("filesystem")
+  local serial=require("serialization")
+  local computer=require("computer")
+  local event=require("event")
+  local path="/home/.openbeekeeper-data/apiary-run"
+  local function call(method,...)
+    local v,err=read(method,...); assert(not err,err)
+    assert(v~=false,"Component rejected operation"); return v
+  end
+  local function decode(text)
+    local ok,v=pcall(serial.unserialize,text)
+    assert(ok and type(v)=="table" and v.schema=="APIARY1" and type(v.jobs)=="table","Invalid run journal; preserve it for inspection")
+    return v
+  end
+  local saved=readText(path..".new") or readText(path)
+  local state=saved and decode(saved) or nil
+  if args[2]=="status" then
+    if not state then print("No apiary run saved."); return end
+    print("Apiary run: "..(state.finished and "finished" or "paused/running").."; cycles="..state.completed)
+    for key,job in pairs(state.jobs) do print(key,job.uid,job.phase) end
+    return
+  end
+  if state and not state.finished then
+    assert(args[2]=="resume","Unfinished run exists. Use bees run resume (or bees run status)")
+  else
+    assert(args[2]==nil,"Use bees run, bees run resume, or bees run status")
+    assert(not fs.exists(path..".bak") or saved,"Primary run journal missing; inspect backup before starting")
+    state={schema="APIARY1",jobs={},completed=0,finished=false,target=DRONE_TARGET}
+  end
+  local function save()
+    local directory="/home/.openbeekeeper-data"
+    if not fs.exists(directory) then assert(fs.makeDirectory(directory)) end
+    local text=serial.serialize(state)
+    writeText(path..".new",text)
+    assert(readText(path..".new")==text,"Run journal verification failed")
+    local old=readText(path)
+    if old then writeText(path..".bak",old); assert(fs.remove(path)) end
+    assert(fs.rename(path..".new",path))
+  end
+  assert(state.target==DRONE_TARGET,"Saved stock target differs; inspect run before changing target")
+  local networkIndex,networkError=roleIndex("network",networks)
+  assert(networkIndex,networkError)
+  local endpoint=networks[networkIndex]
+  if state.network then assert(state.network==endpoint.address,"Saved ME endpoint changed; restore/review run") end
+  state.network=endpoint.address
+  assert(not fs.exists(BIND_PENDING) and not fs.exists(pendingPath),"Finish pending interface/binding recovery first")
+  local binding=assert(readText(BIND_PATH),"Run bees bind first")
+  assert(binding:match("^OpenBeekeeper%-modules%-1\n"),"Invalid module bindings")
+  local byTransposer,byInterface,modules,stations,byKey={},{},{},{},{}
+  for _,e in ipairs(transposers) do byTransposer[e.address]=e end
+  for _,e in ipairs(networks) do byInterface[e.address]=e end
+  for line in binding:gmatch("[^\n]+") do
+    local address,side,iface=line:match("^interface (%S+) (%d+) (%S+)$")
+    if address then
+      assert(not modules[address],"Duplicate module binding")
+      local t=assert(byTransposer[address],"Missing bound transposer: "..address)
+      local m=assert(byInterface[iface],"Missing bound interface: "..iface)
+      side=tonumber(side)
+      assert(side<=5 and call(t.proxy.getInventoryName,side)=="appliedenergistics2:interface","Interface adjacency changed; rebind after resolving run")
+      assert(m.methods.store~=nil and m.methods.setInterfaceConfiguration~=nil,"Bound component lacks interface API")
+      modules[address]={address=address,t=t.proxy,m=m.proxy,interface=iface,source=side}
+    end
+  end
+  for line in binding:gmatch("[^\n]+") do
+    local address,side,name=line:match("^machine (%S+) (%d+) (%S+)$")
+    if name=="gendustry:industrial_apiary" then
+      local module=assert(modules[address],"Machine without module binding")
+      side=tonumber(side)
+      assert(side<=5 and call(module.t.getInventoryName,side)==name,"Apiary adjacency changed")
+      local key=address..":"..side
+      assert(not byKey[key],"Duplicate apiary binding")
+      local station={key=key,module=module,side=side}
+      byKey[key]=station; stations[#stations+1]=station
+    end
+  end
+  assert(#stations>0,"No bound industrial apiaries")
+  table.sort(stations,function(a,b)
+    if a.side~=b.side then return a.side<b.side end
+    return a.key<b.key
+  end)
+  for key,job in pairs(state.jobs) do
+    local s=assert(byKey[key],"Saved apiary missing: "..key)
+    assert(job.interface==s.module.interface,"Saved job interface changed")
+    assert(job.phase=="loading" or job.phase=="running","Unknown saved job phase")
+    job.ticks=0 -- Explicit resume starts a new observation window after repair.
+  end
+  local function input(s,slot) return call(s.module.t.getStackInSlot,s.side,slot) end
+  local function waitTick()
+    assert(event.pull(1)~="interrupted","Paused by Ctrl+C; use bees run resume")
+  end
+  local function emptyBuffer(module)
+    for slot=1,9 do if alive(call(module.t.getStackInSlot,module.source,slot)) then return false end end
+    return true
+  end
+  local function cleanupLease()
+    local lease=state.lease
+    if not lease then return end
+    local interface=component.proxy(lease.interface)
+    for slot=1,2 do
+      call(interface.setInterfaceConfiguration,slot)
+      assert(call(interface.getInterfaceConfiguration,slot)==nil,"Cannot clear owned interface request")
+    end
+    local db=component.proxy(lease.database)
+    for _,slot in ipairs(lease.slots) do
+      call(db.clear,slot)
+      assert(call(db.get,slot)==nil,"Cannot release reserved database entry")
+    end
+    state.lease=nil; save()
+  end
+  local function waitBuffer(module)
+    for attempt=0,15 do
+      if emptyBuffer(module) then return end
+      assert(attempt<15,"Interface buffer not empty; check ME storage space")
+      waitTick()
+    end
+  end
+  local function databaseSlots()
+    for _,e in ipairs(tools.databases) do
+      local slots={}
+      for slot=1,81 do
+        local v,err=read(e.proxy.get,slot)
+        if err then break end
+        if v==nil then slots[#slots+1]=slot end
+        if #slots==2 then return e,slots end
+      end
+    end
+    error("Need two free entries in one OC database")
+  end
+  local function stage(s,job)
+    local module=s.module
+    local first,second=input(s,1),input(s,2)
+    if alive(first) then
+      local uid,kind=bee(first)
+      assert((kind=="queen" or kind=="princess") and uid==job.uid,"Unexpected parent in saved apiary")
+      job.phase="running"; save(); return
+    end
+    -- A queen can finish before the next callback, including during a restart.
+    for slot=7,15 do
+      if alive(input(s,slot)) then job.phase="running"; save(); return end
+    end
+    local loadedDrone=false
+    if alive(second) then
+      local uid,kind=bee(second)
+      assert(not job.queen,"Unexpected drone in a saved queen-only job")
+      assert(kind=="drone" and uid==job.uid,"Unexpected drone in saved apiary")
+      loadedDrone=true
+    end
+    waitBuffer(module)
+    local database,slots=databaseSlots()
+    state.lease={interface=module.interface,database=database.address,slots=slots}; save()
+    local parents={{filter=job.parent,kind=job.queen and "queen" or "princess",index=1}}
+    if not job.queen and not loadedDrone then parents[#parents+1]={filter=job.drone,kind="drone",index=2} end
+    for _,parent in ipairs(parents) do
+      local slot=slots[parent.index]
+      assert(call(module.m.store,parent.filter,database.address,slot,1),"Parent not available in ME")
+      local v=call(database.proxy.get,slot)
+      local uid,kind=bee(v or {})
+      assert(alive(v) and uid==job.uid and kind==parent.kind,"ME descriptor does not match requested parent")
+      assert(call(module.m.setInterfaceConfiguration,parent.index,database.address,slot,1),"Parent request rejected")
+      local request=call(module.m.getInterfaceConfiguration,parent.index)
+      assert(alive(request) and request.size==1,"Expected a one-bee interface request")
+    end
+    local staged={}
+    for attempt=0,15 do
+      staged={}
+      for slot=1,9 do
+        local v=call(module.t.getStackInSlot,module.source,slot)
+        if alive(v) then
+          local uid,kind=bee(v)
+          assert(v.size==1 and uid==job.uid and (kind==parents[1].kind or (kind=="drone" and not job.queen)),"Unexpected item in staging buffer")
+          assert(not staged[kind],"Extra bee in staging buffer")
+          staged[kind]=slot
+        end
+      end
+      if staged[parents[1].kind] and (job.queen or loadedDrone or staged.drone) then break end
+      assert(attempt<15,"Parents not delivered within 15 seconds")
+      waitTick()
+    end
+    assert(not alive(input(s,1)),"Apiary became occupied before loading")
+    if not job.queen and not loadedDrone then
+      assert(not alive(input(s,2)),"Drone slot became occupied before loading")
+      assert(call(module.t.transferItem,module.source,s.side,1,staged.drone,2)==1,"Drone transfer failed; resume to reconcile inputs")
+      call(module.m.setInterfaceConfiguration,2)
+      local v=input(s,2); local uid,kind=bee(v or {})
+      assert(alive(v) and uid==job.uid and kind=="drone","Drone transfer was not confirmed")
+    end
+    assert(call(module.t.transferItem,module.source,s.side,1,staged[parents[1].kind],1)==1,"Parent transfer failed; drone may remain in apiary")
+    job.phase="running"; save()
+    cleanupLease()
+    print("START "..s.key.." "..job.uid)
+  end
+  local function harvest(s,job)
+    local empty=true
+    for slot=7,15 do
+      local v=input(s,slot)
+      if alive(v) then
+        local moved=call(s.module.t.transferItem,s.side,s.module.source,v.size,slot)
+        assert(type(moved)=="number" and moved>=0 and moved<=v.size,"Invalid harvest transfer result")
+        if moved>0 then
+          print("RETURN "..moved.." "..tostring(v.label or v.name).." from "..s.key)
+          local _,kind=bee(v)
+          if kind then job.offspring=true; save() end
+        end
+        if alive(input(s,slot)) then empty=false end
+      end
+    end
+    return empty
+  end
+  local function free(s)
+    if state.jobs[s.key] or alive(input(s,1)) or alive(input(s,2)) then return false end
+    for slot=7,15 do if alive(input(s,slot)) then return false end end
+    return true
+  end
+  local function pools(items)
+    local result={}
+    for _,v in pairs(items) do
+      if alive(v) then
+        local uid,kind=bee(v)
+        if uid then
+          local e=result[uid] or {uid=uid,drone=0,princess=0,queen=0}; result[uid]=e
+          e[kind]=e[kind]+v.size
+          if type(v.label)=="string" and v.label~="" then e[kind.."Filter"]={name=v.name,label=v.label} end
+        end
+      end
+    end
+    return result
+  end
+  local function perform()
+    cleanupLease()
+    local checked={}
+    for _,s in ipairs(stations) do
+      local module=s.module
+      if not checked[module.address] then
+        for slot=1,9 do assert(call(module.m.getInterfaceConfiguration,slot)==nil,"Bound interface has existing requests") end
+        waitBuffer(module); checked[module.address]=true
+      end
+    end
+    save()
+    print("REPRODUCTION: "..#stations.." apiaries; drone target="..DRONE_TARGET..". Ctrl+C pauses; bees run resume continues.")
+    local nextRead=0
+    local stock={}
+    local fresh=false
+    local idle=0
+    while true do
+      for _,s in ipairs(stations) do
+        local job=state.jobs[s.key]
+        if job then
+          if job.phase=="loading" then stage(s,job) end
+          local empty=harvest(s,job)
+          local first,second=input(s,1),input(s,2)
+          if not alive(first) and not alive(second) and empty then
+            if not job.offspring then print("REVIEW "..s.key..": cycle ended; bee offspring not observed (may already be returned).") end
+            state.jobs[s.key]=nil; state.completed=state.completed+1; save()
+            fresh=false
+            print("CYCLE COMPLETE "..job.uid.."; total="..state.completed)
+          else
+            job.ticks=(job.ticks or 0)+1
+            assert(job.ticks<=900,"Apiary stalled for 900 polling cycles: "..s.key..". Check power, flowers and errors; then bees run resume")
+          end
+        end
+      end
+      if computer.uptime()>=nextRead then
+        local items,err=readME(endpoint,true)
+        assert(type(items)=="table",err or "ME inventory read failed")
+        stock=pools(items); fresh=true; nextRead=computer.uptime()+ME_INTERVAL
+      end
+      local active={}; local activeCount=0
+      for _,job in pairs(state.jobs) do active[job.uid]=true; activeCount=activeCount+1 end
+      local candidates={}
+      if fresh then
+        for uid,e in pairs(stock) do
+          if e.drone<DRONE_TARGET and not active[uid] and
+              (e.queenFilter or (e.princessFilter and e.drone>0 and e.droneFilter)) then
+            candidates[#candidates+1]=e
+          end
+        end
+        table.sort(candidates,function(a,b) return a.uid<b.uid end)
+      end
+      local started=0
+      for _,s in ipairs(stations) do
+        local e=candidates[started+1]
+        if not e then break end
+        if free(s) then
+          local job={uid=e.uid,parent=e.queenFilter or e.princessFilter,drone=e.droneFilter,
+            queen=e.queenFilter~=nil,interface=s.module.interface,phase="loading",ticks=0}
+          state.jobs[s.key]=job; save(); stage(s,job)
+          started=started+1; activeCount=activeCount+1
+        end
+      end
+      if fresh and activeCount==0 then
+        if #candidates>0 then
+          idle=idle+1
+          assert(idle<=15,"No empty bound apiary; existing unowned bees/outputs are preserved")
+        else
+          local missing=0
+          for uid,e in pairs(stock) do
+            if e.drone<DRONE_TARGET then missing=missing+1; print("NEEDS PARENT "..uid.." P="..e.princess.." D="..e.drone.." Q="..e.queen) end
+          end
+          state.finished=true; save()
+          print("Reproduction finished: cycles="..state.completed.."; species below target without an available pair="..missing)
+          print("No mutation, imprinting or sampling jobs were started.")
+          return
+        end
+      else idle=0 end
+      if state.completed>=1000 then error("1000-cycle limit reached; inspect stock and run status") end
+      waitTick()
+    end
+  end
+  local ok,err=pcall(perform)
+  if not ok then
+    local cleaned,cleanupError=pcall(cleanupLease)
+    print("Run paused: "..tostring(err))
+    if not cleaned then print("Request cleanup pending: "..tostring(cleanupError)) end
+    print("Loaded bees stay in their apiaries. Inspect the problem, then bees run resume.")
+    return false
+  end
+  return true
+end
+
+if command=="run" then
+  local ok,result=pcall(runApiaries)
+  if not ok then print("Run not started: "..tostring(result)); return false end
+  return result
+elseif command=="plan" then
   local ok,err=pcall(collectionPlan)
   if not ok then print("Planning stopped: "..tostring(err)); return false end
 elseif command=="bind" or command=="bind-reset" then
@@ -559,7 +888,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.7.1 - read-only discovery")
+  print("OpenBeekeeper 0.8.0 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
@@ -864,6 +1193,6 @@ elseif command=="map" or command=="owned" then
   print("Preview is not the full species list. Use bees owned for collected entries only.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | plan | bind | bind-reset | modules | interface-test | interface-reset")
+  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | plan | run [resume/status] | bind | bind-reset | modules | interface-test | interface-reset")
 end
 print("Read-only. No items moved.")
