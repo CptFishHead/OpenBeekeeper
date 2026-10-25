@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.5.1: ME discovery includes export buses and databases.
+-- OpenBeekeeper 0.6.0: scalable module discovery and interface binding.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -16,7 +16,7 @@ end
 -- This is a polling cooldown, not cancellation of an in-progress OC callback.
 local ME_INTERVAL=20
 local snapshots={}
-local function readME(entry)
+local function readME(entry,force)
   local ok,value,reason=pcall(function()
     local computer=require("computer")
     local fs=require("filesystem")
@@ -35,7 +35,7 @@ local function readME(entry)
         if parsed then cached=value end
       end
     end
-    if type(cached)=="table" and cached.schema=="ME1" and cached.machine==machine
+    if not force and type(cached)=="table" and cached.schema=="ME1" and cached.machine==machine
         and cached.endpoint==entry.address and type(cached.stamp)=="number"
         and cached.stamp<=now and now-cached.stamp<ME_INTERVAL and type(cached.items)=="table" then
       snapshots[entry.address]=cached
@@ -244,8 +244,190 @@ local function gene(v)
 end
 
 local transposers,networks,catalogues,tools=discover()
-if command=="scan" then
-  print("OpenBeekeeper 0.5.1 - read-only discovery")
+local pendingPath="/home/.openbeekeeper-data/interface-test-pending"
+local function resetInterfaceTest()
+  local pending=readText(pendingPath)
+  if not pending then return end
+  local interfaceAddress,databaseAddress=pending:match("^(%S+) (%S+)%s*$")
+  assert(interfaceAddress and databaseAddress,"Invalid interface-test journal")
+  local interface=component.proxy(interfaceAddress)
+  local database=component.proxy(databaseAddress)
+  local _,err=read(interface.setInterfaceConfiguration,1)
+  assert(not err,err)
+  local config,configError=read(interface.getInterfaceConfiguration,1)
+  assert(not configError and not alive(config),"Cannot clear interface request slot 1")
+  local _,dbError=read(database.clear,1)
+  assert(not dbError,dbError)
+  local value,getError=read(database.get,1)
+  assert(not getError and not alive(value),"Cannot clear test database entry 1")
+  assert(require("filesystem").remove(pendingPath))
+  print("Test request cleared; temporary database entry cleared.")
+end
+
+-- Interface UUIDs and transposer UUIDs have no shared ordering or coordinates.
+-- Correlate them by requesting one harmless item, never by list position.
+local BIND_PATH="/home/.openbeekeeper-data/modules"
+local BIND_PENDING="/home/.openbeekeeper-data/bind-pending"
+local function bindModules(recover)
+  local fs=require("filesystem")
+  local function call(method,...)
+    local value,err=read(method,...)
+    assert(not err,err)
+    assert(value~=false,"Component operation rejected")
+    return value
+  end
+  local modules,interfaces={},{}
+  for _,entry in ipairs(transposers) do
+    local module={entry=entry,machines={}}
+    for side=0,5 do
+      local name=read(entry.proxy.getInventoryName,side)
+      if name=="appliedenergistics2:interface" then
+        assert(module.side==nil,"Several interfaces touch transposer "..entry.address)
+        module.side=side
+      elseif name=="gendustry:industrial_apiary" or name=="gendustry:mutatron"
+          or name=="gendustry:mutatron_advanced" or name=="gendustry:imprinter"
+          or name=="gendustry:sampler" or name=="forestry:analyzer" then
+        module.machines[#module.machines+1]={side=side,name=name}
+      end
+    end
+    if module.side~=nil and #module.machines>0 then modules[#modules+1]=module end
+  end
+  for _,entry in ipairs(networks) do
+    if entry.methods.setInterfaceConfiguration~=nil and entry.methods.getInterfaceConfiguration~=nil then
+      interfaces[#interfaces+1]=entry
+    end
+  end
+  local function waitEmpty(module)
+    for attempt=0,15 do
+      local empty=true
+      for slot=1,9 do
+        if alive(call(module.entry.proxy.getStackInSlot,module.side,slot)) then empty=false end
+      end
+      if empty then return end
+      if attempt<15 then os.sleep(1) end
+    end
+    error("Interface did not empty; check ME storage space and run bees bind-reset")
+  end
+  local function cleanup()
+    local text=readText(BIND_PENDING)
+    if not text then return end
+    local address,dbAddress,slot=text:match("^OBBIND1\n(%S+) (%S+) (%d+)\n$")
+    assert(address and dbAddress,"Invalid binding journal; preserve it for recovery")
+    slot=tonumber(slot)
+    local proxy=component.proxy(address)
+    call(proxy.setInterfaceConfiguration,9)
+    assert(call(proxy.getInterfaceConfiguration,9)==nil,"Request 9 remains configured")
+    -- Clear the request before releasing the descriptor, including after a restart.
+    local database=component.proxy(dbAddress)
+    local value=call(database.get,slot)
+    assert(not alive(value) or value.name=="minecraft:cobblestone","Reserved database entry changed")
+    call(database.clear,slot)
+    assert(call(database.get,slot)==nil,"Temporary database entry not cleared")
+    assert(fs.remove(BIND_PENDING))
+  end
+  if recover then
+    cleanup()
+    for _,module in ipairs(modules) do waitEmpty(module) end
+    print("Binding request cleared. No machine inventory was changed.")
+    return
+  end
+  assert(not fs.exists(BIND_PENDING),"Unfinished binding. Run bees bind-reset first")
+  assert(not fs.exists(pendingPath),"Finish bees interface-reset first")
+  assert(#modules>0,"No processing module with an adjacent ME interface found")
+  assert(#modules==#interfaces,"Need one configurable interface per module: modules="..#modules..", interfaces="..#interfaces)
+  assert(#tools.databases>0,"One OC database is required")
+  -- Never overwrite requests or draw conclusions from an already occupied buffer.
+  for _,entry in ipairs(interfaces) do
+    for slot=1,9 do
+      assert(call(entry.proxy.getInterfaceConfiguration,slot)==nil,"Interface has existing requests: "..entry.address)
+    end
+  end
+  for _,module in ipairs(modules) do
+    for slot=1,9 do
+      assert(not alive(call(module.entry.proxy.getStackInSlot,module.side,slot)),"Interface inventory must be empty: "..module.entry.address)
+    end
+  end
+  local db,dbSlot
+  for _,entry in ipairs(tools.databases) do
+    for slot=1,81 do
+      local value,err=read(entry.proxy.get,slot)
+      if err then break end
+      if value==nil then db,dbSlot=entry,slot; break end
+    end
+    if db then break end
+  end
+  assert(db,"No free OC database entry")
+  assert(fs.makeDirectory("/home/.openbeekeeper-data"))
+  local rows={"OpenBeekeeper-modules-1"}
+  local used={}
+  local ok,err=pcall(function()
+    for index,interface in ipairs(interfaces) do
+      -- Write ownership before any mutating call so interruption is recoverable.
+      writeText(BIND_PENDING,"OBBIND1\n"..interface.address.." "..db.address.." "..dbSlot.."\n")
+      if index==1 then
+        assert(call(interface.proxy.store,{name="minecraft:cobblestone"},db.address,dbSlot,1),"No cobblestone available in ME")
+      else
+        -- Reuse the previous descriptor; no further ME inventory/store queries.
+        assert(call(db.proxy.get,dbSlot).name=="minecraft:cobblestone","Marker descriptor missing")
+      end
+      local marker=call(db.proxy.get,dbSlot)
+      assert(marker and marker.name=="minecraft:cobblestone","ME store did not find cobblestone")
+      assert(call(interface.proxy.setInterfaceConfiguration,9,db.address,dbSlot,1),"Interface request rejected")
+      local found
+      for attempt=0,15 do
+        found=nil
+        for _,module in ipairs(modules) do
+          local present=false
+          for slot=1,9 do
+            local value=call(module.entry.proxy.getStackInSlot,module.side,slot)
+            if alive(value) then
+              assert(value.name=="minecraft:cobblestone" and value.size==1,"Unexpected item in interface during binding")
+              assert(not present,"Multiple marker stacks in an interface")
+              present=true
+            end
+          end
+          if present then assert(not found,"Marker visible at multiple modules"); found=module end
+        end
+        if found then break end
+        if attempt<15 then os.sleep(1) end
+      end
+      assert(found,"No marker delivered within 15 seconds")
+      assert(not used[found.entry.address],"Several interface components map to one module")
+      used[found.entry.address]=true
+      call(interface.proxy.setInterfaceConfiguration,9)
+      assert(call(interface.proxy.getInterfaceConfiguration,9)==nil,"Cannot clear marker request")
+      waitEmpty(found)
+      rows[#rows+1]="interface "..found.entry.address.." "..found.side.." "..interface.address
+      for _,machine in ipairs(found.machines) do
+        rows[#rows+1]="machine "..found.entry.address.." "..machine.side.." "..machine.name
+      end
+      print("BOUND "..index.."/"..#interfaces..": "..found.entry.address.." -> "..interface.address.."; machines="..#found.machines)
+      -- Retain journal ownership of the descriptor across modules and crashes.
+    end
+    cleanup()
+    writeText(BIND_PATH..".new",table.concat(rows,"\n").."\n")
+    if fs.exists(BIND_PATH..".bak") then assert(fs.remove(BIND_PATH..".bak")) end
+    if fs.exists(BIND_PATH) then assert(fs.rename(BIND_PATH,BIND_PATH..".bak")) end
+    assert(fs.rename(BIND_PATH..".new",BIND_PATH))
+  end)
+  if not ok then
+    local cleaned,cleanupError=pcall(cleanup)
+    if not cleaned then print("Cleanup pending: "..tostring(cleanupError)) end
+    error(tostring(err))
+  end
+  print("Saved "..#interfaces.." module bindings. No bees moved; machine slots untouched.")
+end
+
+if command=="bind" or command=="bind-reset" then
+  local ok,err=pcall(bindModules,command=="bind-reset")
+  if not ok then print("Binding stopped: "..tostring(err)); return false end
+  return true
+elseif command=="modules" then
+  local text=readText(BIND_PATH) or readText(BIND_PATH..".bak")
+  print(text or "No module bindings. Run bees bind.")
+  return true
+elseif command=="scan" then
+  print("OpenBeekeeper 0.6.0 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
@@ -255,6 +437,111 @@ if command=="scan" then
 elseif command=="me" then
   listNetworks(networks)
   listTools(tools)
+elseif command=="interface-reset" then
+  local ok,err=pcall(resetInterfaceTest)
+  if not ok then print("Cleanup failed: "..tostring(err)); return false end
+  return true
+elseif command=="interface-test" then
+  local ok,err=pcall(function()
+    resetInterfaceTest()
+    local interfaces={}
+    for _,e in ipairs(networks) do
+      if e.methods.setInterfaceConfiguration~=nil and e.methods.getInterfaceConfiguration~=nil then
+        interfaces[#interfaces+1]=e
+      end
+    end
+    assert(#interfaces==1,"Test requires exactly one configurable ME interface")
+    assert(#tools.databases==1,"Test requires exactly one OC database")
+    local interface=interfaces[1]
+    local database=tools.databases[1]
+    local entry,entryError=read(database.proxy.get,1)
+    assert(not entryError and not alive(entry),"Database entry 1 must be empty")
+    for slot=1,9 do
+      local config,configError=read(interface.proxy.getInterfaceConfiguration,slot)
+      assert(not configError and not alive(config),"All interface requests must be empty")
+    end
+    local candidates={}
+    for _,e in ipairs(transposers) do
+      local interfaceSides,apiarySides={},{}
+      for side=0,5 do
+        local name=read(e.proxy.getInventoryName,side)
+        if name=="appliedenergistics2:interface" then interfaceSides[#interfaceSides+1]=side end
+        if name=="gendustry:industrial_apiary" then apiarySides[#apiarySides+1]=side end
+      end
+      if #interfaceSides==1 and #apiarySides>0 then
+        candidates[#candidates+1]={entry=e,source=interfaceSides[1],apiaries=apiarySides}
+      end
+    end
+    assert(#candidates==1,"Test requires one unambiguous transposer with interface and apiaries")
+    local station=candidates[1]
+    local t=station.entry.proxy
+    for slot=1,9 do
+      local stack,stackError=read(t.getStackInSlot,station.source,slot)
+      assert(not stackError and not alive(stack),"Interface inventory must be empty before test")
+    end
+    local destination
+    for _,side in ipairs(station.apiaries) do
+      local queen,qe=read(t.getStackInSlot,side,1)
+      local drone,de=read(t.getStackInSlot,side,2)
+      if not qe and not de and not alive(queen) and not alive(drone) then destination=side; break end
+    end
+    assert(destination,"An apiary must have empty queen and drone slots")
+    local expected="forestry.speciesCultivated"
+    local items,itemsError=readME(interface)
+    assert(type(items)=="table",itemsError or "Cannot read ME")
+    local chosen
+    for _,v in pairs(items) do
+      if alive(v) then local id,kind=bee(v); if id==expected and kind=="drone" then chosen=v; break end end
+    end
+    assert(chosen,"Put at least one Cultivated Drone in this ME network")
+    print("Test route: interface side "..station.source.." -> apiary side "..destination..", drone slot 2")
+    local fs=require("filesystem")
+    if not fs.exists("/home/.openbeekeeper-data") then assert(fs.makeDirectory("/home/.openbeekeeper-data")) end
+    -- Journal BEFORE any mutation. Recovery clears only initially empty entries.
+    writeText(pendingPath,interface.address.." "..database.address.."\n")
+    local _,storeError=read(interface.proxy.store,{name=chosen.name,label=chosen.label},database.address,1,1)
+    assert(not storeError,storeError)
+    local stored,getError=read(database.proxy.get,1)
+    assert(not getError and alive(stored),"ME did not store a descriptor in database entry 1")
+    local id,kind=bee(stored)
+    assert(id==expected and kind=="drone","Stored database descriptor is not the expected drone")
+    local _,setError=read(interface.proxy.setInterfaceConfiguration,1,database.address,1,1)
+    assert(not setError,setError)
+    local request,requestError=read(interface.proxy.getInterfaceConfiguration,1)
+    assert(not requestError and alive(request) and request.size==1,"One-drone interface request was not applied")
+    local sourceSlot
+    for attempt=1,10 do
+      for slot=1,9 do
+        local v=read(t.getStackInSlot,station.source,slot)
+        if alive(v) then
+          local uid,beeKind=bee(v)
+          assert(uid==expected and beeKind=="drone","Unexpected item appeared in interface; stopping")
+          sourceSlot=slot; break
+        end
+      end
+      if sourceSlot then break end
+      if attempt<10 then os.sleep(1) end
+    end
+    assert(sourceSlot,"Interface did not supply the drone within 9 seconds")
+    local queen,queenError=read(t.getStackInSlot,destination,1)
+    local drone,droneError=read(t.getStackInSlot,destination,2)
+    assert(not queenError and not droneError and not alive(queen) and not alive(drone),
+      "Apiary is no longer empty; stopping before transfer")
+    local moved,moveError=read(t.transferItem,station.source,destination,1,sourceSlot,2)
+    assert(moved==1,moveError or "Drone transfer failed")
+    local output,outputError=read(t.getStackInSlot,destination,2)
+    local uid,beeKind=bee(output or {})
+    assert(not outputError and alive(output) and output.size==1 and uid==expected and beeKind=="drone",
+      "Destination verification failed; inspect apiary before repeating")
+    print("SUCCESS: one Cultivated Drone transferred. No princess loaded; breeding not started.")
+  end)
+  local cleaned,cleanupError=pcall(resetInterfaceTest)
+  if not cleaned then
+    print("Request cleanup failed: "..tostring(cleanupError))
+    print("Clear interface request slot 1 manually or run bees interface-reset before continuing.")
+  end
+  if not ok then print("Interface test stopped: "..tostring(err)) end
+  return ok and cleaned
 elseif command=="setup" then
   local selection={}
   local shared=not args[3] and not args[4]
@@ -445,6 +732,6 @@ elseif command=="map" or command=="owned" then
   print("Preview is not the full species list. Use bees owned for collected entries only.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned")
+  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | bind | bind-reset | modules | interface-test | interface-reset")
 end
 print("Read-only. No items moved.")
