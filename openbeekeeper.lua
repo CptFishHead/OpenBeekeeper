@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.6.1: scalable module discovery and interface binding.
+-- OpenBeekeeper 0.7.0: scalable module discovery and interface binding.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -420,7 +420,126 @@ local function bindModules(recover)
   print("Saved "..#interfaces.." module bindings. No bees moved; machine slots untouched.")
 end
 
-if command=="bind" or command=="bind-reset" then
+local function collectionPlan()
+  local index,err=roleIndex("network",networks)
+  assert(index,err)
+  local items,readError=readME(networks[index])
+  assert(type(items)=="table",readError or "ME inventory unavailable")
+  local species,names,recipes={},{},{}
+  local function entry(uid,label)
+    if type(uid)~="string" or uid=="" then return end
+    if not species[uid] then species[uid]={uid=uid,label=label or uid,princess=0,drone=0,queen=0,samples=0} end
+    if label and label~="" then species[uid].label=label end
+    return species[uid]
+  end
+  -- One world catalogue suffices; every housing exposes the same registry.
+  for _,catalogue in ipairs(catalogues) do
+    local data=read(catalogue.proxy.listAllSpecies)
+    if type(data)=="table" then
+      for _,v in pairs(data) do
+        if type(v)=="table" then entry(v.uid,v.name) end
+      end
+      local mutations=read(catalogue.proxy.getBeeBreedingData)
+      if type(mutations)=="table" then recipes=mutations end
+      break
+    end
+  end
+  for _,v in pairs(items) do
+    if alive(v) then
+      local uid,kind=bee(v)
+      if uid then
+        local e=entry(uid,type(v.individual)=="table" and v.individual.displayName)
+        if e then e[kind]=e[kind]+v.size end
+      end
+      local g=gene(v)
+      if g and g.chromosome==0 then entry(g.allele).samples=entry(g.allele).samples+v.size end
+    end
+  end
+  -- Resolve names only after collecting all IDs, never use a label as a bee UID.
+  for uid,e in pairs(species) do
+    if names[e.label]==nil then names[e.label]=uid elseif names[e.label]~=uid then names[e.label]=false end
+  end
+  local unverified=0
+  for _,v in pairs(items) do
+    if alive(v) and v.name=="gendustry:gene_sample" and not gene(v) then
+      local label=tostring(v.label or ""):match("^Bee Sample %- Species: (.+)$")
+      local uid=label and names[label]
+      if uid then species[uid].labelSample=true end
+      unverified=unverified+v.size
+    end
+  end
+  local owned={}
+  for _,e in pairs(species) do
+    if e.princess+e.drone+e.queen>0 then owned[#owned+1]=e end
+  end
+  table.sort(owned,function(a,b) return a.label<b.label end)
+  print("COLLECTION PLAN / read-only; ME stock only (machines excluded)")
+  print("P=princesses D=drones Q=queens; reserve at least one drone per species")
+  local ready,breed,blocked=0,0,0
+  for _,e in ipairs(owned) do
+    local action
+    if e.samples>0 then action="KEEP: structured species sample present"
+    elseif e.labelSample then action="REVIEW: sample label present; identity not NBT-confirmed"
+    elseif e.drone>=2 then
+      ready=ready+1
+      action="SAMPLE CANDIDATE: "..(e.drone-1).." surplus drones; random chromosome, donor consumed"
+    elseif e.queen>0 then
+      breed=breed+1; action="APIARY: finish queen cycle to obtain offspring"
+    elseif e.princess>0 and e.drone>0 then
+      breed=breed+1; action="REPRODUCE: same-species pair, then sample surplus drones"
+    else
+      blocked=blocked+1; action="MISSING PARENT: preserve current stock"
+    end
+    print(string.format("%s P=%d D=%d Q=%d | %s | %s",e.label,e.princess,e.drone,e.queen,action,e.uid))
+  end
+  print(string.format("Owned species: %d | sample candidates: %d | reproduction: %d | missing parents: %d",#owned,ready,breed,blocked))
+  print("NEXT MUTATIONS / only recipes whose result has no observed bee or sample")
+  local candidateRows,seen={},{}
+  local function resolve(value)
+    if type(value)~="string" then return end
+    if species[value] then return species[value] end
+    local uid=names[value]; return uid and species[uid] or nil
+  end
+  for _,recipe in pairs(recipes) do
+    if type(recipe)=="table" then
+      local a,b,result=resolve(recipe.allele1),resolve(recipe.allele2),resolve(recipe.result)
+      if a and b and result and result.princess+result.drone+result.queen==0
+          and result.samples==0 and not result.labelSample then
+        local p,d
+        if a.princess>0 and b.drone>0 then p,d=a,b
+        elseif b.princess>0 and a.drone>0 then p,d=b,a end
+        if p then
+          local key=p.uid.."/"..d.uid.."/"..result.uid
+          if not seen[key] then
+            seen[key]=true
+            local conditions={}
+            if type(recipe.specialConditions)=="table" then
+              for _,v in pairs(recipe.specialConditions) do conditions[#conditions+1]=tostring(v) end
+            elseif recipe.specialConditions~=nil and tostring(recipe.specialConditions)~="" then
+              conditions[1]=tostring(recipe.specialConditions)
+            end
+            table.sort(conditions)
+            local reserve=(p.princess<2 or d.drone<2) and " | REVIEW: last parent of this type" or ""
+            candidateRows[#candidateRows+1]=p.label.." (P) + "..d.label.." (D) -> "..result.label
+              .." | "..tostring(recipe.chance or "?").."%"..reserve
+              ..(#conditions>0 and " | CONDITIONS: "..table.concat(conditions,"; ") or "")
+          end
+        end
+      end
+    end
+  end
+  table.sort(candidateRows)
+  for _,row in ipairs(candidateRows) do print(row) end
+  if #candidateRows==0 then print("No available pair for an unobserved result in the current catalogue.") end
+  print("Mutatron result selection is not exposed by the installed OC driver.")
+  print("Plan only: no donors consumed, no requests configured, no jobs started.")
+  if unverified>0 then print("Sample items without structured gene identity: "..unverified..". Label evidence requires review.") end
+end
+
+if command=="plan" then
+  local ok,err=pcall(collectionPlan)
+  if not ok then print("Planning stopped: "..tostring(err)); return false end
+elseif command=="bind" or command=="bind-reset" then
   local ok,err=pcall(bindModules,command=="bind-reset")
   if not ok then print("Binding stopped: "..tostring(err)); return false end
   return true
@@ -429,7 +548,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.6.1 - read-only discovery")
+  print("OpenBeekeeper 0.7.0 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
@@ -734,6 +853,6 @@ elseif command=="map" or command=="owned" then
   print("Preview is not the full species list. Use bees owned for collected entries only.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | bind | bind-reset | modules | interface-test | interface-reset")
+  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | plan | bind | bind-reset | modules | interface-test | interface-reset")
 end
 print("Read-only. No items moved.")
