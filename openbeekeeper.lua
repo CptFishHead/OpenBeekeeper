@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.7.0: scalable module discovery and interface binding.
+-- OpenBeekeeper 0.7.1: scalable module discovery and interface binding.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -15,6 +15,7 @@ end
 -- One shared ME read interval, including separate CLI invocations.
 -- This is a polling cooldown, not cancellation of an in-progress OC callback.
 local ME_INTERVAL=20
+local DRONE_TARGET=32
 local snapshots={}
 local function readME(entry,force)
   local ok,value,reason=pcall(function()
@@ -474,21 +475,30 @@ local function collectionPlan()
   end
   table.sort(owned,function(a,b) return a.label<b.label end)
   print("COLLECTION PLAN / read-only; ME stock only (machines excluded)")
-  print("P=princesses D=drones Q=queens; reserve at least one drone per species")
+  print("P=princesses D=drones Q=queens; drone stock target/reserve: "..DRONE_TARGET.." per species")
   local ready,breed,blocked=0,0,0
   for _,e in ipairs(owned) do
     local action
-    if e.samples>0 then action="KEEP: structured species sample present"
+    if e.drone<DRONE_TARGET then
+      local deficit=DRONE_TARGET-e.drone
+      if e.queen>0 then
+        breed=breed+1; action="APIARY: finish queen cycle; stock deficit="..deficit
+      elseif e.princess>0 and e.drone>0 then
+        breed=breed+1; action="REPRODUCE: build stock to "..DRONE_TARGET.."; deficit="..deficit
+      else
+        blocked=blocked+1; action="MISSING PARENT: stock deficit="..deficit.."; preserve current stock"
+      end
+    elseif e.samples>0 then action="KEEP: structured species sample present; stock target reached"
     elseif e.labelSample then action="REVIEW: sample label present; identity not NBT-confirmed"
-    elseif e.drone>=2 then
+    elseif e.drone>DRONE_TARGET then
       ready=ready+1
-      action="SAMPLE CANDIDATE: "..(e.drone-1).." surplus drones; random chromosome, donor consumed"
+      action="SAMPLE CANDIDATE: "..(e.drone-DRONE_TARGET).." surplus drones; reserve="..DRONE_TARGET.."; random chromosome, donor consumed"
     elseif e.queen>0 then
-      breed=breed+1; action="APIARY: finish queen cycle to obtain offspring"
+      breed=breed+1; action="APIARY: obtain sample donors above reserve="..DRONE_TARGET
     elseif e.princess>0 and e.drone>0 then
-      breed=breed+1; action="REPRODUCE: same-species pair, then sample surplus drones"
+      breed=breed+1; action="REPRODUCE: obtain sample donors above reserve="..DRONE_TARGET
     else
-      blocked=blocked+1; action="MISSING PARENT: preserve current stock"
+      blocked=blocked+1; action="MISSING PARENT: stock target reached; need surplus donors; reserve="..DRONE_TARGET
     end
     print(string.format("%s P=%d D=%d Q=%d | %s | %s",e.label,e.princess,e.drone,e.queen,action,e.uid))
   end
@@ -519,7 +529,8 @@ local function collectionPlan()
               conditions[1]=tostring(recipe.specialConditions)
             end
             table.sort(conditions)
-            local reserve=(p.princess<2 or d.drone<2) and " | REVIEW: last parent of this type" or ""
+            local reserve=p.princess<2 and " | REVIEW: last princess of this species" or ""
+            if d.drone<=DRONE_TARGET then reserve=reserve.." | REVIEW: would draw from drone reserve="..DRONE_TARGET end
             candidateRows[#candidateRows+1]=p.label.." (P) + "..d.label.." (D) -> "..result.label
               .." | "..tostring(recipe.chance or "?").."%"..reserve
               ..(#conditions>0 and " | CONDITIONS: "..table.concat(conditions,"; ") or "")
@@ -548,7 +559,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.7.0 - read-only discovery")
+  print("OpenBeekeeper 0.7.1 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")

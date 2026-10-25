@@ -23,9 +23,9 @@ class PlanningTests(unittest.TestCase):
     def plan(self, code=''):
         return runtime.RuntimeTests().run_script(SETUP+code, 'plan')
 
-    def test_surplus_drones_leave_one_reserved(self):
+    def test_surplus_drones_leave_thirty_two_reserved(self):
         text, _, lua=self.plan("network('me',{stack('a','A','drone',64)})")
-        self.assertIn('A P=0 D=64 Q=0 | SAMPLE CANDIDATE: 63 surplus', text)
+        self.assertIn('A P=0 D=64 Q=0 | SAMPLE CANDIDATE: 32 surplus', text)
         self.assertEqual(len(list(lua.globals().networkCalls.values())), 1)
         self.assertIn('No items moved', text)
 
@@ -34,25 +34,45 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('P=8 D=0 Q=0 | MISSING PARENT', text)
         self.assertIn('sample candidates: 0', text)
 
+    def test_exact_target_is_not_sampler_surplus(self):
+        text, _, _=self.plan("network('me',{stack('a','A','drone',32)})")
+        self.assertIn('stock target reached; need surplus donors; reserve=32', text)
+        self.assertIn('sample candidates: 0', text)
+
+    def test_thirty_three_drones_allow_one_donor(self):
+        text, _, _=self.plan("network('me',{stack('a','A','drone',33)})")
+        self.assertIn('SAMPLE CANDIDATE: 1 surplus drones; reserve=32', text)
+
+    def test_sample_owned_still_replenishes_low_drone_stock(self):
+        for sample_expr in ("sample('a',0)", "{name='gendustry:gene_sample',label='Bee Sample - Species: A',size=1}"):
+            with self.subTest(sample=sample_expr):
+                text, _, _=self.plan("network('me',{"+sample_expr+",stack('a','A','drone',31),stack('a','A','princess',1)})")
+                self.assertIn('REPRODUCE: build stock to 32; deficit=1', text)
+                self.assertIn('sample candidates: 0', text)
+
+    def test_mutation_marks_consumption_of_target_reserve(self):
+        text, _, _=self.plan("catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',32)})")
+        self.assertIn('would draw from drone reserve=32', text)
+
     def test_pair_and_queen_are_separate_reproduction_actions(self):
         text, _, _=self.plan("network('me',{stack('a','A','princess',1),stack('a','A','drone',1),stack('b','B','queen',1)})")
         self.assertIn('P=1 D=1 Q=0 | REPRODUCE', text)
         self.assertIn('P=0 D=0 Q=1 | APIARY', text)
 
     def test_labels_remain_review_only(self):
-        text, _, _=self.plan("network('me',{{name='gendustry:gene_sample',label='Bee Sample - Species: A',size=1},stack('a','A','drone',8)})")
+        text, _, _=self.plan("network('me',{{name='gendustry:gene_sample',label='Bee Sample - Species: A',size=1},stack('a','A','drone',64)})")
         self.assertIn('REVIEW: sample label present', text)
         self.assertIn('sample candidates: 0', text)
 
     def test_nbt_species_sample_kept_but_speed_does_not_count(self):
-        text, _, _=self.plan("network('me',{sample('a',0),sample('b',1),stack('a','A','drone',8),stack('b','B','drone',8)})")
-        self.assertIn('A P=0 D=8 Q=0 | KEEP', text)
-        self.assertIn('B P=0 D=8 Q=0 | SAMPLE CANDIDATE', text)
+        text, _, _=self.plan("network('me',{sample('a',0),sample('b',1),stack('a','A','drone',64),stack('b','B','drone',64)})")
+        self.assertIn('A P=0 D=64 Q=0 | KEEP', text)
+        self.assertIn('B P=0 D=64 Q=0 | SAMPLE CANDIDATE', text)
 
     def test_mutation_direction_conditions_and_last_parent_review(self):
         text, _, lua=self.plan("catalogue('h1'); catalogue('h2'); network('me',{stack('b','B','princess',1),stack('a','A','drone',1)})")
         self.assertIn('B (P) + A (D) -> C | 12%', text)
-        self.assertIn('REVIEW: last parent', text)
+        self.assertIn('REVIEW: last princess', text)
         self.assertIn('CONDITIONS: During the night.', text)
         self.assertEqual(lua.globals().catalogueReads, 1)
 
