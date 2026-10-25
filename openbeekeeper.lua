@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.2: discovery, ME diagnostics, collection preview. Read-only.
+-- OpenBeekeeper 0.3.0: discovery, ME diagnostics, collection preview. Read-only.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -96,7 +96,7 @@ end
 
 local transposers,networks,catalogues=discover()
 if command=="scan" then
-  print("OpenBeekeeper 0.2 - read-only discovery")
+  print("OpenBeekeeper 0.3.0 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
