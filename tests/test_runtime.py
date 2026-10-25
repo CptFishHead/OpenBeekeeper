@@ -8,6 +8,18 @@ SOURCE = (Path(__file__).resolve().parents[1] / "openbeekeeper.lua").read_text(e
 
 HARNESS = r'''
 devices={}; lines={}; methodFlags={}; colour=0xFFFFFF
+clock=0; sleeps={}; stateFiles={}; networkCalls={}
+os.sleep=function(seconds) sleeps[#sleeps+1]=seconds; clock=clock+seconds end
+io.open=function(path,mode)
+  if mode=='r' and stateFiles[path]==nil then return nil,'missing' end
+  return {read=function() return stateFiles[path] end,
+    write=function(_,text) stateFiles[path]=text; return true end,
+    flush=function() return true end,close=function() return true end}
+end
+package.preload.computer=function() return {
+  uptime=function() return clock end,address=function() return 'test-computer' end} end
+package.preload.filesystem=function() return {
+  exists=function(path) return stateFiles[path]~=nil end,makeDirectory=function() return true end} end
 print=function(...)
   local parts={}; for i=1,select('#',...) do parts[i]=tostring(select(i,...)) end
   lines[#lines+1]={text=table.concat(parts,' '),colour=colour}
@@ -42,7 +54,8 @@ function worker(address,side,items)
 end
 function network(address,items,offline)
   devices[address]={kind='custom_server_me',
-    getItemsInNetwork=function() if offline then return nil,'offline' end return items end,
+    getItemsInNetwork=function() networkCalls[#networkCalls+1]=clock
+      if offline then return nil,'offline' end return items end,
     setInterfaceConfiguration=function() error('MUTATION FORBIDDEN') end}
 end
 function drone(id)
@@ -192,6 +205,27 @@ class RuntimeTests(unittest.TestCase):
         row = [(t, c) for t, c in rows if t.startswith('[-]') and 'server.speciesUnknown' in t]
         self.assertEqual(len(row), 1)
         self.assertEqual(row[0][1], 0xAAAAAA)
+
+    def test_me_reads_across_networks_wait_thirty_seconds(self):
+        _, _, lua = self.run_script("network('a',{}); network('b',{})", "map", "1", "2")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 30])
+        self.assertEqual(list(lua.globals().sleeps.values()), [30])
+
+    def test_me_cooldown_survives_separate_cli_invocations(self):
+        _, _, lua = self.run_script("network('a',{})", "probe", "1")
+        lua.globals().clock = 12
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "probe", "1")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 30])
+        self.assertEqual(list(lua.globals().sleeps.values()), [18])
+
+    def test_failed_me_attempt_also_uses_cooldown(self):
+        _, _, lua = self.run_script("network('a',{},true); network('b',{})", "map", "1", "2")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 30])
+
+    def test_component_listing_does_not_read_me_or_wait(self):
+        _, _, lua = self.run_script("network('a',{})", "me")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [])
+        self.assertEqual(list(lua.globals().sleeps.values()), [])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.3.2: discovery, ME diagnostics, collection preview. Read-only.
+-- OpenBeekeeper 0.3.3: discovery, ME diagnostics, collection preview. Read-only.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -8,6 +8,45 @@ local function read(method, ...)
   -- OpenOS callbacks may be callable proxy objects, not Lua functions.
   if method==nil then return nil,"method unavailable" end
   local ok,value,reason=pcall(method,...)
+  if not ok then return nil,tostring(value) end
+  return value,reason
+end
+
+-- One shared ME read interval, including separate CLI invocations.
+-- This is a polling cooldown, not cancellation of an in-progress OC callback.
+local ME_INTERVAL=30
+local function readME(entry)
+  local ok,value,reason=pcall(function()
+    local computer=require("computer")
+    local fs=require("filesystem")
+    local directory="/home/.openbeekeeper-data"
+    local clockPath=directory.."/me-last-read"
+    local now=computer.uptime()
+    local machine=computer.address()
+    local last
+    if fs.exists(clockPath) then
+      local file=assert(io.open(clockPath,"r"))
+      local record=file:read("*a"); file:close()
+      local id,stamp=record:match("^(%S+) (%S+)%s*$")
+      local parsed=tonumber(stamp)
+      assert(id and parsed and parsed>=0 and parsed<math.huge,"Invalid ME polling clock")
+      -- A copied disk or a reset uptime must not inherit a stale cooldown.
+      if id==machine and parsed<=now then last=parsed end
+    end
+    if last and now-last<ME_INTERVAL then
+      local remaining=ME_INTERVAL-(now-last)
+      print("ME cooldown: waiting "..math.ceil(remaining).." seconds...")
+      os.sleep(remaining)
+    end
+    if not fs.exists(directory) then assert(fs.makeDirectory(directory)) end
+    local file=assert(io.open(clockPath,"w"))
+    assert(file:write(machine.." "..string.format("%.17g",computer.uptime()).."\n"))
+    assert(file:flush())
+    local closed,err=file:close()
+    assert(closed~=false and not err,err or "Cannot save ME polling clock")
+    -- Failed attempts also consume the interval, avoiding rapid retries.
+    return read(entry.proxy.getItemsInNetwork)
+  end)
   if not ok then return nil,tostring(value) end
   return value,reason
 end
@@ -97,7 +136,7 @@ end
 
 local transposers,networks,catalogues=discover()
 if command=="scan" then
-  print("OpenBeekeeper 0.3.2 - read-only discovery")
+  print("OpenBeekeeper 0.3.3 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
@@ -127,7 +166,7 @@ elseif command=="probe" then
   local index=tonumber(args[2])
   local entry=index and networks[index]
   if not entry then listNetworks(networks); print("Use: lua openbeekeeper.lua probe <ME number>"); return end
-  local items,err=read(entry.proxy.getItemsInNetwork)
+  local items,err=readME(entry)
   if type(items)~="table" then print("ME read failed: "..tostring(err)); return end
   local serialization=require("serialization")
   local shown=0
@@ -184,7 +223,7 @@ elseif command=="map" then
   local warnings={}
   local function readNetwork(index,source)
     if not index then return end
-    local items,err=read(networks[index].proxy.getItemsInNetwork)
+    local items,err=readME(networks[index])
     if type(items)~="table" then warnings[#warnings+1]=source..": "..tostring(err); return end
     if source=="archive" then archiveReadable=true end
     for _,v in pairs(items) do if alive(v) then collect(v,source) end end
