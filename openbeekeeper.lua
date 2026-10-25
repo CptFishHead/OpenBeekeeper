@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.4.0: saved ME roles and species collection. No item movement.
+-- OpenBeekeeper 0.5.0: one ME network, cached bee snapshots, local buffers.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -14,7 +14,8 @@ end
 
 -- One shared ME read interval, including separate CLI invocations.
 -- This is a polling cooldown, not cancellation of an in-progress OC callback.
-local ME_INTERVAL=30
+local ME_INTERVAL=20
+local snapshots={}
 local function readME(entry)
   local ok,value,reason=pcall(function()
     local computer=require("computer")
@@ -23,6 +24,24 @@ local function readME(entry)
     local clockPath=directory.."/me-last-read"
     local now=computer.uptime()
     local machine=computer.address()
+    local serialization=require("serialization")
+    local cachePath=directory.."/me-cache-"..entry.address:gsub("[^%w%-]","_")
+    local cached=snapshots[entry.address]
+    if not cached and fs.exists(cachePath) then
+      local f=io.open(cachePath,"r")
+      if f then
+        local text=f:read("*a"); f:close()
+        local parsed,value=pcall(serialization.unserialize,text)
+        if parsed then cached=value end
+      end
+    end
+    if type(cached)=="table" and cached.schema=="ME1" and cached.machine==machine
+        and cached.endpoint==entry.address and type(cached.stamp)=="number"
+        and cached.stamp<=now and now-cached.stamp<ME_INTERVAL and type(cached.items)=="table" then
+      snapshots[entry.address]=cached
+      print("ME cache: snapshot "..math.floor(now-cached.stamp).." seconds old.")
+      return cached.items
+    end
     local last
     if fs.exists(clockPath) then
       local file=assert(io.open(clockPath,"r"))
@@ -45,7 +64,27 @@ local function readME(entry)
     local closed,err=file:close()
     assert(closed~=false and not err,err or "Cannot save ME polling clock")
     -- Failed attempts also consume the interval, avoiding rapid retries.
-    return read(entry.proxy.getItemsInNetwork)
+    local items,readError=read(entry.proxy.getItemsInNetwork)
+    if type(items)~="table" then return nil,readError end
+    -- Keep only bee/sample descriptors, not a copy of a potentially huge base.
+    local relevant={}
+    for _,item in pairs(items) do
+      if type(item)=="table" then
+        local name=tostring(item.name or ""):lower()
+        if name:find("bee_",1,true) or name:find("sample",1,true) then relevant[#relevant+1]=item end
+      end
+    end
+    local snapshot={schema="ME1",machine=machine,endpoint=entry.address,stamp=computer.uptime(),items=relevant}
+    snapshots[entry.address]=snapshot
+    local saved,saveError=pcall(function()
+      local text=serialization.serialize(snapshot)
+      local f=assert(io.open(cachePath..".new","w"))
+      assert(f:write(text)); assert(f:flush()); f:close()
+      if fs.exists(cachePath) then assert(fs.remove(cachePath)) end
+      assert(fs.rename(cachePath..".new",cachePath))
+    end)
+    if not saved then print("ME cache not saved: "..tostring(saveError)) end
+    return relevant
   end)
   if not ok then return nil,tostring(value) end
   return value,reason
@@ -138,6 +177,11 @@ local function writeText(path,text)
 end
 local function parseRoles(text)
   if not text then return end
+  if text:match("^OpenBeekeeper%-roles%-2\n") then
+    local address=text:match("^OpenBeekeeper%-roles%-2\nnetwork ([%w%-]+)\n?$")
+    assert(address,"Invalid shared network record")
+    return {mode="shared",network=address,stock=address,transport=address,genes=address}
+  end
   assert(text:match("^OpenBeekeeper%-roles%-1\n"),"Invalid roles header")
   local result={}
   for line in text:gmatch("[^\n]+") do
@@ -161,7 +205,8 @@ local function loadRoles()
 end
 local function roleIndex(role,networks)
   local roles,err=loadRoles()
-  if not roles then return nil,err or "No saved roles. Use bees setup <stock> <transport> <genes>." end
+  if not roles then return nil,err or "No saved network. Use bees setup <ME number>." end
+  if role=="network" then role="stock" end
   for i,entry in ipairs(networks) do if entry.address==roles[role] then return i end end
   return nil,"Missing "..role.." endpoint. Rebind roles after replacing a component."
 end
@@ -179,7 +224,7 @@ end
 
 local transposers,networks,catalogues=discover()
 if command=="scan" then
-  print("OpenBeekeeper 0.4.0 - read-only discovery")
+  print("OpenBeekeeper 0.5.0 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
@@ -189,12 +234,14 @@ elseif command=="me" then
   listNetworks(networks)
 elseif command=="setup" then
   local selection={}
-  for i,role in ipairs(roleNames) do selection[role]=networks[tonumber(args[i+1])] end
+  local shared=not args[3] and not args[4]
+  for i,role in ipairs(roleNames) do selection[role]=networks[tonumber(shared and args[2] or args[i+1])] end
   if not selection.stock or not selection.transport or not selection.genes then
-    listNetworks(networks); print("Use: bees setup <stock number> <transport number> <genes number>"); return false
+    listNetworks(networks); print("Use: bees setup <ME number> (or legacy: <stock> <transport> <genes>)"); return false
   end
   local text="OpenBeekeeper-roles-1\n"
   for _,role in ipairs(roleNames) do text=text..role.." "..selection[role].address.."\n" end
+  if shared then text="OpenBeekeeper-roles-2\nnetwork "..selection.stock.address.."\n" end
   local ok,err=pcall(function()
     parseRoles(text)
     local fs=require("filesystem")
@@ -207,13 +254,18 @@ elseif command=="setup" then
     assert(fs.rename(ROLE_PATH..".new",ROLE_PATH),"Cannot publish roles file")
   end)
   if not ok then print("Roles not saved: "..tostring(err)); return false end
-  for _,role in ipairs(roleNames) do print(role.." = "..selection[role].address) end
-  print("Roles saved. Endpoints must belong to physically separate networks.")
+  if shared then
+    print("Shared ME network saved: "..selection.stock.address)
+    print("Bee stock and samples use ONE snapshot. Working buffer: local apiarist chest.")
+  else
+    for _,role in ipairs(roleNames) do print(role.." = "..selection[role].address) end
+    print("Legacy split-network roles saved.")
+  end
   print("Replacing a component requires rebinding; changing list order does not.")
 elseif command=="roles" then
   local roles,err=loadRoles()
   if not roles then print(err or "No saved roles. Use bees setup."); return false end
-  for _,role in ipairs(roleNames) do
+  for _,role in ipairs(roles.mode=="shared" and {"network"} or roleNames) do
     local index=roleIndex(role,networks)
     print(role,roles[role],index and ("OK, current number "..index) or "MISSING - rebind required")
   end
@@ -237,7 +289,7 @@ elseif command=="catalog" then
   print("listAllSpecies is mutation results, not a proven complete list of every species.")
 elseif command=="probe" then
   local index=tonumber(args[2])
-  if args[2]=="stock" or args[2]=="transport" or args[2]=="genes" then
+  if args[2]=="stock" or args[2]=="transport" or args[2]=="genes" or args[2]=="network" then
     local err; index,err=roleIndex(args[2],networks)
     if not index then print(err); return false end
   end
@@ -299,7 +351,7 @@ elseif command=="map" or command=="owned" then
       known[id]=known[id] or {label=(v.individual or {}).displayName or id}
       known[id].bee=true
     end
-    if source=="archive" then
+    if source=="archive" or source=="combined" then
       local g=gene(v)
       if g and g.chromosome==0 then
         known[g.allele]=known[g.allele] or {label=g.allele}
@@ -323,10 +375,21 @@ elseif command=="map" or command=="owned" then
     if not index then return end
     local items,err=readME(networks[index])
     if type(items)~="table" then warnings[#warnings+1]=source..": "..tostring(err); return end
-    if source=="archive" then archiveReadable=true end
-    for _,v in pairs(items) do if alive(v) then collect(v,source) end end
+    if source=="archive" or source=="combined" then archiveReadable=true end
+    if source=="combined" then
+      -- Resolve live bee UIDs/names before matching any sample labels,
+      -- independent of the ME result order (especially wild species).
+      for _,v in pairs(items) do if alive(v) then collect(v,"stock") end end
+      for _,v in pairs(items) do if alive(v) then collect(v,"archive") end end
+    else
+      for _,v in pairs(items) do if alive(v) then collect(v,source) end end
+    end
   end
-  readNetwork(stockIndex,"stock"); readNetwork(geneIndex,"archive")
+  if stockIndex and stockIndex==geneIndex then
+    readNetwork(stockIndex,"combined")
+  else
+    readNetwork(stockIndex,"stock"); readNetwork(geneIndex,"archive")
+  end
   local rows={}
   for id,v in pairs(known) do v.id=id; rows[#rows+1]=v end
   table.sort(rows,function(a,b) return a.label<b.label end)
@@ -359,6 +422,6 @@ elseif command=="map" or command=="owned" then
   print("Preview is not the full species list. Use bees owned for collected entries only.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | setup <stock> <transport> <genes> | roles | catalog | probe <number/role> | map | owned")
+  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned")
 end
 print("Read-only. No items moved.")

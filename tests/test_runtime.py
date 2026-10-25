@@ -45,8 +45,14 @@ package.preload.component=function() return {
   end,
   isAvailable=function(k) return k=='gpu' end, gpu=gpu
 } end
+serialValues={}; serialNumber=0
 package.preload.serialization=function() return {serialize=function(v)
-  return 'SERIALIZED:'..tostring(v.name or v.result or v.uid or 'record') end} end
+  if v.schema=='ME1' then
+    serialNumber=serialNumber+1; local token='CACHE:'..serialNumber
+    serialValues[token]=v; return token
+  end
+  return 'SERIALIZED:'..tostring(v.name or v.result or v.uid or 'record') end,
+  unserialize=function(text) return serialValues[text] end} end
 function worker(address,side,items)
   devices[address]={kind='transposer',
     getInventorySize=function(s) if s==side then return #items end return nil,'no inventory' end,
@@ -208,21 +214,42 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(row), 1)
         self.assertEqual(row[0][1], 0xAAAAAA)
 
-    def test_me_reads_across_networks_wait_thirty_seconds(self):
+    def test_me_reads_across_networks_wait_twenty_seconds(self):
         _, _, lua = self.run_script("network('a',{}); network('b',{})", "map", "1", "2")
-        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 30])
-        self.assertEqual(list(lua.globals().sleeps.values()), [30])
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 20])
+        self.assertEqual(list(lua.globals().sleeps.values()), [20])
 
-    def test_me_cooldown_survives_separate_cli_invocations(self):
+    def test_me_snapshot_survives_separate_cli_invocations(self):
         _, _, lua = self.run_script("network('a',{})", "probe", "1")
         lua.globals().clock = 12
         lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "probe", "1")
-        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 30])
-        self.assertEqual(list(lua.globals().sleeps.values()), [18])
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0])
+        self.assertEqual(list(lua.globals().sleeps.values()), [])
+
+    def test_different_endpoint_still_observes_persistent_cooldown(self):
+        _, _, lua = self.run_script("network('a',{}); network('b',{})", "probe", "1")
+        lua.globals().clock = 12
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "probe", "2")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 20])
+        self.assertEqual(list(lua.globals().sleeps.values()), [8])
+
+    def test_expired_snapshot_is_refreshed(self):
+        _, _, lua = self.run_script("network('a',{})", "probe", "1")
+        lua.globals().clock = 20
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "probe", "1")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 20])
+
+    def test_corrupt_cache_is_ignored_without_bypassing_request_cooldown(self):
+        _, _, lua = self.run_script("network('a',{})", "probe", "1")
+        lua.globals().stateFiles['/home/.openbeekeeper-data/me-cache-a'] = 'broken-cache'
+        lua.globals().clock = 10
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "probe", "1")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 20])
+        self.assertEqual(list(lua.globals().sleeps.values()), [10])
 
     def test_failed_me_attempt_also_uses_cooldown(self):
         _, _, lua = self.run_script("network('a',{},true); network('b',{})", "map", "1", "2")
-        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 30])
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0, 20])
 
     def test_component_listing_does_not_read_me_or_wait(self):
         _, _, lua = self.run_script("network('a',{})", "me")
@@ -238,6 +265,35 @@ class RuntimeTests(unittest.TestCase):
         text = '\n'.join(row.text for row in lua.globals().lines.values())
         self.assertIn("stock a-stock OK, current number 2", text)
         self.assertIn("genes c-genes OK, current number 4", text)
+
+    def test_single_network_setup_reads_bees_and_samples_once(self):
+        _, _, lua = self.run_script("""
+          network('shared',{drone('forestry.speciesDiligent'),sample('forestry.speciesDiligent')})
+        """, "setup", "1")
+        lua.execute("lines={}")
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "owned")
+        rows = [(row.text, row.colour) for row in lua.globals().lines.values()]
+        self.assertTrue(any(t.startswith('[B] [G]') for t, _ in rows))
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0])
+        self.assertEqual(list(lua.globals().sleeps.values()), [])
+
+    def test_shared_roles_and_named_probe_survive_new_endpoint_order(self):
+        _, _, lua = self.run_script("network('shared',{})", "setup", "1")
+        lua.execute("network('000-new',{}); lines={}")
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "roles")
+        text = '\n'.join(row.text for row in lua.globals().lines.values())
+        self.assertIn("network shared OK, current number 2", text)
+        lua.eval("function(src, ...) return assert(load(src))(... ) end")(SOURCE, "probe", "network")
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0])
+
+    def test_shared_network_matches_sample_before_wild_bee_in_result_order(self):
+        _, rows, lua = self.run_script("""
+          local d=drone('server.wildRocky'); d.individual.displayName='Rocky'
+          network('shared',{{name='gendustry:gene_sample',size=1,
+            label='Bee Sample - Species: Rocky'},d})
+        """, "owned", "1", "1")
+        self.assertTrue(any(t.startswith('[B] [L]') and 'server.wildRocky' in t for t, _ in rows))
+        self.assertEqual(list(lua.globals().networkCalls.values()), [0])
 
     def test_saved_roles_do_not_silently_rebind_missing_network(self):
         _, _, lua = self.run_script("""
