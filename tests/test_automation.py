@@ -1,0 +1,355 @@
+"""End-to-end machine chain with exact, opaque NBT database references."""
+from pathlib import Path
+import unittest
+import test_runtime as runtime
+import automation_fixture as legacy
+
+FULL = legacy.FIXTURE + r'''
+local function clone(v)
+ if type(v)~='table' then return v end
+ local x={}; for k,y in pairs(v) do x[k]=clone(y) end; return x
+end
+local function descriptor(v)
+ local x=clone(v); if x then x._nbt=nil end; return x
+end
+local serial=require('serialization'); local oldSerialize=serial.serialize
+serial.serialize=function(v)
+ if v.schema=='AUTO1' then serialNumber=serialNumber+1; local key='AUTO:'..serialNumber; serialValues[key]=clone(v); return key end
+ return oldSerialize(v)
+end
+local originalBee=beeStack
+beeStack=function(uid,kind,count)
+ local v=originalBee(uid,kind,count); v.individual.isAnalyzed=false; v._nbt='raw'; return v
+end
+devices.db.get=function(slot) return descriptor(dbSlots[slot]) end
+local function store(filter,address,slot,count)
+ assert(address=='db' and count==1); stores=stores+1
+ for _,v in pairs(stock) do
+  if v.size>0 and (not filter.name or v.name==filter.name) and (not filter.label or v.label==filter.label) then
+   dbSlots[slot]=clone(v); dbSlots[slot].size=1; return true
+  end
+ end
+ return true
+end
+devices.me.store=store
+local binding=stateFiles['/home/.openbeekeeper-data/modules']
+processors={}; visits={}; sampled={}; observedMutations={}; comparisons=0
+local types={[5]='analyzer',[6]='imprinter',[7]='sampler',[8]='mutatron'}
+local ids={analyzer='forestry:analyzer',imprinter='gendustry:imprinter',sampler='gendustry:sampler',mutatron='gendustry:mutatron'}
+for n=5,8 do
+ local module=n; local kind=types[n]; bins[n]={}; configurations[n]={}; processors[n]={}
+ if kind=='imprinter' then processors[n][1]={name='gendustry:gene_template',label='Genetic Template',size=1} end
+ local lab=kind=='mutatron' and 4 or 2
+ if kind~='analyzer' then processors[n][lab]={name='gendustry:labware',label='Genetics Labware',size=64} end
+ if kind=='sampler' then processors[n][1]={name='gendustry:gene_sample_blank',label='Blank Gene Sample',size=64} end
+ binding=binding..'interface t'..n..' 1 if'..n..'\nmachine t'..n..' 0 '..ids[kind]..'\n'
+ devices['if'..n]={kind='me_interface',store=store,getItemsInNetwork=function() error('WRONG ENDPOINT') end}
+ devices['t'..n]={kind='transposer',
+  getInventoryName=function(side) if side==1 then return 'appliedenergistics2:interface' elseif side==0 then return ids[kind] end return nil,'no inventory' end,
+  getStackInSlot=function(side,slot) if side==1 then return descriptor(bins[module][slot]) end return descriptor(processors[module][slot]) end,
+  getFluidInTank=function(side) return {{amount=(kind=='analyzer' and noHoney) and 0 or 10000}} end,
+  transferItem=function(from,to,count,slot,destination)
+   if from==1 then
+    if failProcessorLoad and kind==failProcessorLoad then return 0 end
+    assert(not processors[module][destination]); assert(count==bins[module][slot].size)
+    processors[module][destination]=clone(bins[module][slot]); bins[module][slot]=nil
+    visits[#visits+1]={uid=processors[module][destination].individual and processors[module][destination].individual.ident,kind=kind,nbt=processors[module][destination]._nbt}
+    return count
+   end
+   assert(from==0 and to==1)
+   local v=assert(processors[module][slot]); assert(count==v.size)
+   local moved=partialFull and math.min(1,count) or count
+   if v.individual then
+    local k=v.name:find('princess') and 'princess' or v.name:find('queen') and 'queen' or 'drone'
+    add(v.individual.ident,k,moved)
+   elseif v.name=='gendustry:gene_sample' then
+    local key='sample:'..v.label
+    if not stock[key] then stock[key]=clone(v); stock[key].size=0 end
+    stock[key].size=stock[key].size+moved
+   end
+   v.size=v.size-moved; if v.size==0 then processors[module][slot]=nil end
+   return moved
+  end}
+end
+stateFiles['/home/.openbeekeeper-data/modules']=binding
+for n=1,8 do
+ local module=n
+ local oldMove=devices['t'..n].transferItem
+ if n<=4 then
+  devices['t'..n].transferItem=function(from,to,count,slot,destination)
+   if from==1 then
+    local v=bins[module][slot]
+    if not v.name:find('queen') then assert(v.individual.isAnalyzed and v._nbt:find('imprinted',1,true),'UNPREPARED MATING PARENT') end
+   end
+   return oldMove(from,to,count,slot,destination)
+  end
+ end
+ devices['t'..n].store=function(side,slot,address,index)
+  assert(address=='db')
+  local v=module<=4 and (side==1 and bins[module][slot] or apiaries[module][side][slot])
+    or (side==1 and bins[module][slot] or processors[module][slot])
+  assert(v); dbSlots[index]=clone(v); return true
+ end
+ devices['t'..n].compareStackToDatabase=function(side,slot,address,index,nbt)
+  comparisons=comparisons+1; assert(nbt==true and address=='db')
+  local v=bins[module][slot]; local r=dbSlots[index]
+  return not badNBT and v and r and v.name==r.name and v._nbt==r._nbt
+ end
+ devices['if'..n].store=store
+ devices['if'..n].getInterfaceConfiguration=function(slot) return descriptor(configurations[module][slot]) end
+ devices['if'..n].setInterfaceConfiguration=function(slot,address,index,count)
+  if not address then
+   if cleanupFails then error('cleanup failed') end
+   configurations[module][slot]=nil
+   local v=bins[module][slot]
+   if v then
+    if v.individual then
+     local k=v.name:find('princess') and 'princess' or v.name:find('queen') and 'queen' or 'drone'
+     add(v.individual.ident,k,v.size)
+    else
+     for _,x in pairs(stock) do if x.name==v.name and x.label==v.label then x.size=x.size+v.size; break end end
+    end
+    bins[module][slot]=nil
+   end
+   return true
+  end
+  assert(slot==9)
+  local v=clone(dbSlots[index]); v.size=count
+  local source
+  if v.individual then
+   local k=v.name:find('princess') and 'princess' or v.name:find('queen') and 'queen' or 'drone'
+   source=stock[v.individual.ident..':'..k]
+  else for _,x in pairs(stock) do if x.name==v.name and x.label==v.label then source=x; break end end end
+  configurations[module][slot]=clone(v)
+  if source and source.size>=count and not noSupply then source.size=source.size-count; bins[module][slot]=v end
+  return true
+ end
+end
+devices.catalogue={kind='bee_housing',
+ listAllSpecies=function() return {{uid='a',name='a'},{uid='b',name='b'},{uid='goal',name='goal'},{uid='side',name='side'},{uid='conditional',name='conditional'}} end,
+ getBeeBreedingData=function() return {
+  {allele1='a',allele2='b',result='goal',chance=10,specialConditions=onlyConditional and {'Night'} or {}},
+  {allele1='a',allele2='b',result='conditional',chance=99,specialConditions={'Nether'}}} end}
+local basePull=require('event').pull
+require('event').pull=function(seconds)
+ local ret=basePull(seconds); if ret=='interrupted' then return ret end
+ for n,p in pairs(processors) do
+  local kind=types[n]
+  if not stallProcessor or stallProcessor~=kind then
+   if kind=='analyzer' and p[3] and not p[9] and not noHoney then
+    p[9]=clone(p[3]); p[9].individual.isAnalyzed=true; p[9]._nbt='analyzed|'..p[9]._nbt; p[3]=nil
+   elseif kind=='imprinter' and p[3] and not p[4] and p[2] and p[2].size>0 then
+    assert(p[3].individual.isAnalyzed,'IMPRINT BEFORE ANALYSIS')
+    p[4]=clone(p[3]); p[4]._nbt='imprinted|'..p[4]._nbt
+    if changeSpecies then p[4].individual.ident='WRONG' end
+    if geneticDeath and p[3].name:find('princess') then p[4]={name='gendustry:waste',label='Genetic Waste',size=1}; geneticDeath=false end
+    p[3]=nil; p[2].size=p[2].size-1; if p[2].size==0 then p[2]=nil end
+   elseif kind=='sampler' and p[3] and not p[4] and p[1] and p[2] then
+    assert(p[3]._nbt:find('imprinted',1,true),'UNPREPARED SAMPLE')
+    local uid=p[3].individual.ident; sampled[#sampled+1]=uid
+    local success=not sampleFailures or #sampled>sampleFailures
+    p[4]={name='gendustry:gene_sample',size=1,label=success and ('Bee Sample - Species: '..uid) or 'Bee Sample - Speed: Fast'}
+    if not hideSampleNBT then p[4].tag={species='rootBees',chromosome=success and 0 or 1,allele=success and uid or 'speed.fast'} end
+    p[3]=nil; p[1].size=p[1].size-1; p[2].size=p[2].size-1
+   elseif kind=='mutatron' and p[1] and p[2] and not p[3] then
+    assert(p[1]._nbt:find('imprinted',1,true) and p[2]._nbt:find('imprinted',1,true),'UNPREPARED MUTATION')
+    local uid=mutationResult or (#observedMutations==0 and 'side' or 'goal')
+    observedMutations[#observedMutations+1]=uid
+    p[3]=beeStack(uid,'queen',1); p[1]=nil; p[2]=nil
+   end
+  end
+ end
+ return ret
+end
+'''
+
+
+class AutomationTests(unittest.TestCase):
+    def execute(self, setup='', *args):
+        return runtime.RuntimeTests().run_script(FULL+setup, 'auto', *args)
+
+    def test_prepares_both_parents_in_order_before_mating_and_bulk_returns(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.gene=sample('a'); interruptAt=45; callableMode=true")
+        self.assertNotIn('UNPREPARED', text)
+        self.assertNotIn('AUTO NOT STARTED', text)
+        self.assertEqual(lua.globals().stock['a:drone'].size, 34)
+        self.assertEqual([v.kind for v in lua.globals().visits.values() if v.uid], ['analyzer','imprinter','analyzer','imprinter'])
+        self.assertGreaterEqual(lua.globals().comparisons, 6)
+        self.assertIn('APIARY COMPLETE', text)
+
+    def test_samples_only_surplus_and_recognizes_actual_gene(self):
+        text, _, lua=self.execute("add('a','drone',33); hideSampleNBT=true; interruptAt=65")
+        self.assertEqual(lua.globals().stock['a:drone'].size, 32)
+        self.assertEqual(list(lua.globals().sampled.values()), ['a'])
+        self.assertIsNotNone(lua.globals().stock['sample:Bee Sample - Species: a'])
+        self.assertIn('SAMPLE RESULT', text)
+
+    def test_wrong_chromosome_does_not_mark_species_collected(self):
+        text, _, lua=self.execute("add('a','drone',34); sampleFailures=1; interruptAt=80")
+        self.assertEqual(list(lua.globals().sampled.values()), ['a','a'])
+        self.assertEqual(lua.globals().stock['a:drone'].size, 32)
+        self.assertIsNotNone(lua.globals().stock['sample:Bee Sample - Speed: Fast'])
+        self.assertIsNotNone(lua.globals().stock['sample:Bee Sample - Species: a'])
+
+    def test_mutatron_side_result_is_saved_and_not_reported_as_target(self):
+        text, _, lua=self.execute("add('a','princess',6); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=30")
+        self.assertIn('MUTATION RESULT side wanted goal SIDE SPECIES SAVED', text)
+        self.assertGreaterEqual(lua.globals().stock['side:drone'].size, 3)
+        self.assertIsNone(lua.globals().stock['goal:drone'])
+
+    def test_conditional_recipes_are_not_dispatched(self):
+        text, _, lua=self.execute("onlyConditional=true; add('a','princess',2); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=30")
+        self.assertEqual(list(lua.globals().observedMutations.values()), [])
+        self.assertNotIn('FLOW mutate', text)
+
+    def test_roulette_is_retried_after_side_species_is_preserved(self):
+        text, _, lua=self.execute("add('a','princess',6); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); stock.lab={name='gendustry:labware',label='Genetics Labware',size=1000}; interruptAt=900")
+        self.assertEqual(list(lua.globals().observedMutations.values())[:2], ['side','goal'])
+        self.assertIn('MUTATION RESULT goal wanted goal MATCH', text)
+
+    def test_labware_refills_from_me_without_touching_template(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); processors[6][2]=nil; stock.lab={name='gendustry:labware',label='Genetics Labware',size=64}; interruptAt=50")
+        self.assertEqual(lua.globals().stock['a:drone'].size, 34)
+        self.assertEqual(lua.globals().processors[6][1].name, 'gendustry:gene_template')
+        self.assertLess(lua.globals().stock.lab.size, 64)
+
+    def test_opaque_nbt_mismatch_blocks_input(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); badNBT=true; interruptAt=30")
+        self.assertIn('NBT differs', text)
+        self.assertEqual(list(lua.globals().visits.values()), [])
+        self.assertFalse(list(lua.globals().configurations[5].items()))
+
+    def test_changed_species_from_imprinter_is_quarantined(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); changeSpecies=true; interruptAt=40")
+        self.assertIn('Processor changed bee species/type', text)
+        self.assertEqual(len(list(lua.globals().loaded.values())), 0)
+        self.assertIsNotNone(lua.globals().processors[6][4])
+
+    def test_genetic_waste_does_not_block_all_automation(self):
+        text, _, lua=self.execute("add('a','princess',2); add('a','drone',31); stock.ga=sample('a'); geneticDeath=true; interruptAt=70")
+        self.assertIn('GENETIC LOSS imprinter a', text)
+        self.assertGreaterEqual(lua.globals().stock['a:drone'].size, 32)
+
+    def test_missing_honey_waits_before_feeding_and_does_not_fake_progress(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); noHoney=true; interruptAt=30")
+        self.assertIn('Analyzer needs liquid honey', text)
+        self.assertEqual(list(lua.globals().visits.values()), [])
+
+    def test_resume_mid_processing_does_not_feed_duplicate_parent(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); interruptAt=3; stallProcessor='analyzer'")
+        before=len(list(lua.globals().visits.values()))
+        lua.execute("interruptAt=clock+45; stallProcessor=nil")
+        lua.eval('function(src) return assert(load(src))("auto","resume") end')(runtime.SOURCE)
+        self.assertEqual(lua.globals().stock['a:drone'].size, 34)
+        self.assertEqual(before, 1)
+        self.assertEqual(len([v for v in lua.globals().visits.values() if v.kind=='analyzer']), 2)
+
+    def test_no_extra_me_inventory_query_for_samples_or_processors(self):
+        _, _, lua=self.execute("add('a','drone',34); sampleFailures=1; interruptAt=80")
+        calls=list(lua.globals().networkCalls.values())
+        self.assertTrue(all(b-a>=20 for a,b in zip(calls,calls[1:])), calls)
+
+    def test_partial_apiary_returns_retry_remainder(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); partialHarvest=true; interruptAt=90")
+        self.assertEqual(lua.globals().stock['a:drone'].size, 34)
+        self.assertTrue(any(r.requested>r.moved for r in lua.globals().harvested.values()))
+
+    def test_resume_after_drone_loading_does_not_load_a_second_drone(self):
+        text, _, lua=self.execute("add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); failPrincess=true; interruptAt=30")
+        self.assertEqual(len([r for r in lua.globals().loaded.values() if r.slot==2]), 1)
+        lua.execute('failPrincess=false; interruptAt=clock+50')
+        lua.eval('function(src) return assert(load(src))("auto") end')(runtime.SOURCE)
+        self.assertEqual(lua.globals().stock['a:drone'].size, 34)
+        self.assertEqual(len([r for r in lua.globals().loaded.values() if r.slot==2]), 1)
+
+    def test_status_is_read_only(self):
+        _, _, lua=self.execute("add('a','drone',33); interruptAt=3; stallProcessor='analyzer'")
+        calls=len(list(lua.globals().networkCalls.values())); visits=len(list(lua.globals().visits.values()))
+        lua.eval('function(src) return assert(load(src))("auto","status") end')(runtime.SOURCE)
+        self.assertEqual(len(list(lua.globals().networkCalls.values())), calls)
+        self.assertEqual(len(list(lua.globals().visits.values())), visits)
+
+    def test_previous_working_queen_is_adopted_without_reloading(self):
+        code="""
+          apiaries[1][2][1]=beeStack('a','queen',1)
+          local s={schema='APIARY1',finished=false,jobs={['t1:2']={uid='a',phase='running'}}}
+          stateFiles['/home/.openbeekeeper-data/apiary-run']=require('serialization').serialize(s)
+          stock.ga=sample('a'); interruptAt=3
+        """
+        text, _, lua=self.execute(code)
+        self.assertIn('Existing apiary jobs adopted', text)
+        self.assertEqual(len(list(lua.globals().loaded.values())), 0)
+        self.assertGreaterEqual(lua.globals().stock['a:drone'].size, 4)
+
+    def test_last_drone_can_be_used_for_restoration_as_authorized(self):
+        text, _, lua=self.execute("add('a','princess',3); add('a','drone',32); add('b','drone',1); stock.ga=sample('a'); interruptAt=25")
+        self.assertIn('RESTORE USING LAST DRONE b', text)
+        self.assertTrue(any(r.uid=='b' and r.kind=='analyzer' for r in lua.globals().visits.values()))
+
+    def test_run_alias_uses_analysis_and_imprinting(self):
+        lua=runtime.LuaRuntime(unpack_returned_tuples=True)
+        lua.execute(runtime.HARNESS); lua.execute(FULL+"add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); interruptAt=45")
+        lua.eval('function(src) return assert(load(src))("run") end')(runtime.SOURCE)
+        self.assertEqual(lua.globals().stock['a:drone'].size,34)
+        self.assertEqual([v.kind for v in lua.globals().visits.values() if v.uid], ['analyzer','imprinter','analyzer','imprinter'])
+
+    def test_long_queen_cycles_fill_four_modules_in_parallel(self):
+        code="""
+          for _,uid in ipairs({'a','b','c','d'}) do add(uid,'princess',1); add(uid,'drone',31); stock['gene:'..uid]=sample(uid) end
+          stall=true; interruptAt=110
+        """
+        text, _, lua=self.execute(code)
+        self.assertEqual({v.module for v in lua.globals().loaded.values()}, {1,2,3,4})
+        self.assertEqual(len(list(lua.globals().loaded.values())),8)
+
+    def test_blank_samples_refill_from_me(self):
+        text, _, lua=self.execute("add('a','drone',33); processors[7][1]=nil; stock.blank={name='gendustry:gene_sample_blank',label='Blank Gene Sample',size=64}; interruptAt=60")
+        self.assertEqual(lua.globals().stock['a:drone'].size,32)
+        self.assertLess(lua.globals().stock.blank.size,64)
+
+    def test_missing_resources_wait_instead_of_consuming_donor(self):
+        text, _, lua=self.execute("add('a','drone',33); processors[7][1]=nil; interruptAt=60")
+        self.assertIn('ME needs Blank Gene Sample',text)
+        self.assertEqual(list(lua.globals().sampled.values()),[])
+
+    def test_occupied_database_entry_survives_full_pipeline(self):
+        text, _, lua=self.execute("dbSlots[1]={name='keep',size=1}; add('a','drone',33); interruptAt=60")
+        self.assertEqual(lua.globals().dbSlots[1].name,'keep')
+
+    def test_corrupt_automation_state_blocks_all_new_inputs(self):
+        text, _, lua=self.execute("stateFiles['/home/.openbeekeeper-data/automation']='BROKEN'; add('a','drone',33); interruptAt=60")
+        self.assertIn('Invalid AUTO1 journal',text)
+        self.assertEqual(list(lua.globals().visits.values()),[])
+
+    def test_crash_after_physical_input_transfer_is_not_replayed(self):
+        code="""
+          add('a','drone',33); interruptAt=60
+          local original=devices.t5.transferItem
+          devices.t5.transferItem=function(...)
+            local moved=original(...)
+            if not crashedOnce then crashedOnce=true; error('crash after physical transfer') end
+            return moved
+          end
+        """
+        text, _, lua=self.execute(code)
+        self.assertIn('crash after physical transfer', text)
+        lua.execute('interruptAt=clock+60')
+        lua.eval('function(src) return assert(load(src))("auto") end')(runtime.SOURCE)
+        self.assertEqual(len([v for v in lua.globals().visits.values() if v.kind=='analyzer']),1)
+        self.assertEqual(lua.globals().stock['a:drone'].size,32)
+
+    def test_processors_preserve_owned_database_refs_after_pause(self):
+        text, _, lua=self.execute("add('a','drone',33); interruptAt=3; stallProcessor='analyzer'; dbSlots[1]={name='keep',size=1}")
+        refs=[v for k,v in lua.globals().dbSlots.items() if k!=1]
+        self.assertTrue(refs)
+        self.assertEqual(lua.globals().dbSlots[1].name,'keep')
+
+    def test_embedded_runtime_matches_maintained_source(self):
+        root=Path(__file__).resolve().parents[1]
+        maintained=(root/'src/automation.lua').read_text(encoding='utf-8')
+        body=runtime.SOURCE.split('-- BEGIN EMBEDDED AUTOMATION\n',1)[1].split('-- END EMBEDDED AUTOMATION\n',1)[0]
+        self.assertEqual(body, maintained)
+
+
+if __name__ == '__main__':
+    unittest.main()

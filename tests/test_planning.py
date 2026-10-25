@@ -13,7 +13,7 @@ function catalogue(address)
    listAllSpecies=function() catalogueReads=catalogueReads+1
      return {{uid='a',name='A'},{uid='b',name='B'},{uid='c',name='C'}} end,
    getBeeBreedingData=function() return {
-     {allele1='A',allele2='B',result='C',chance=12,specialConditions={'During the night.'}}} end}
+     {allele1='A',allele2='B',result='C',chance=12,specialConditions=conditional and {'During the night.'} or {}}} end}
 end
 catalogueReads=0
 '''
@@ -73,8 +73,11 @@ class PlanningTests(unittest.TestCase):
         text, _, lua=self.plan("catalogue('h1'); catalogue('h2'); network('me',{stack('b','B','princess',1),stack('a','A','drone',1)})")
         self.assertIn('B (P) + A (D) -> C | 12%', text)
         self.assertIn('REVIEW: last princess', text)
-        self.assertIn('CONDITIONS: During the night.', text)
         self.assertEqual(lua.globals().catalogueReads, 1)
+
+    def test_conditional_recipe_is_excluded_from_planning(self):
+        text, _, _=self.plan("conditional=true; catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',33)})")
+        self.assertNotIn('-> C', text)
 
     def test_observed_result_not_presented_as_new_species(self):
         text, _, _=self.plan("catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',2),stack('c','C','drone',1)})")
