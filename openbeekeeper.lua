@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.5.0: one ME network, cached bee snapshots, local buffers.
+-- OpenBeekeeper 0.5.1: ME discovery includes export buses and databases.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -108,6 +108,7 @@ end
 
 local function discover()
   local entries,transposers,networks,catalogues={},{},{},{}
+  local tools={exporters={},databases={}}
   for address,kind in component.list() do entries[#entries+1]={address=address,kind=kind} end
   table.sort(entries,function(a,b) return a.address<b.address end)
   for _,entry in ipairs(entries) do
@@ -121,9 +122,13 @@ local function discover()
       -- false means a synchronized callback exists; only nil means absent.
       if methods.getItemsInNetwork~=nil then networks[#networks+1]=entry end
       if methods.listAllSpecies~=nil and methods.getBeeBreedingData~=nil then catalogues[#catalogues+1]=entry end
+      if methods.exportIntoSlot~=nil and methods.setExportConfiguration~=nil then tools.exporters[#tools.exporters+1]=entry end
+      if entry.kind=="database" or (methods.computeHash~=nil and methods.get~=nil and methods.indexOf~=nil) then
+        tools.databases[#tools.databases+1]=entry
+      end
     end
   end
-  return transposers,networks,catalogues
+  return transposers,networks,catalogues,tools
 end
 
 local function inspect(transposers,visitor,verbose)
@@ -163,6 +168,22 @@ local function listNetworks(networks)
   end
   if #networks==0 then print("None. Connect an OC adapter to an ME interface.") end
   print("Numbers are temporary. Never use them as saved role bindings.")
+end
+
+local function listTools(tools)
+  print("ME export-bus components (not network readers): "..#tools.exporters)
+  for i,entry in ipairs(tools.exporters) do
+    print("X"..i,entry.kind,entry.address)
+    for side=0,5 do
+      local config=read(entry.proxy.getExportConfiguration,side)
+      if type(config)=="table" then print("  export side "..side.." ("..sideNames[side]..")") end
+    end
+  end
+  print("OC databases: "..#tools.databases)
+  for i,entry in ipairs(tools.databases) do print("D"..i,entry.kind,entry.address) end
+  if #tools.exporters==0 then
+    print("No export API found. The adapter must touch the AE cable block holding the bus.")
+  end
 end
 
 local ROLE_PATH="/home/.openbeekeeper-data/roles"
@@ -222,16 +243,18 @@ local function gene(v)
   return {root=tag.species,chromosome=chr,allele=tag.allele}
 end
 
-local transposers,networks,catalogues=discover()
+local transposers,networks,catalogues,tools=discover()
 if command=="scan" then
-  print("OpenBeekeeper 0.5.0 - read-only discovery")
+  print("OpenBeekeeper 0.5.1 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
   listNetworks(networks)
+  listTools(tools)
   print("Forestry catalogue endpoints: "..#catalogues)
 elseif command=="me" then
   listNetworks(networks)
+  listTools(tools)
 elseif command=="setup" then
   local selection={}
   local shared=not args[3] and not args[4]

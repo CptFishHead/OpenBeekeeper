@@ -114,6 +114,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("custom_server_me", text)
         self.assertIn("Numbers are temporary", text)
 
+    def test_me_lists_export_bus_and_database_without_network_read_api(self):
+        text, _, lua = self.run_script("""
+          methodFlags.exportIntoSlot=false; methodFlags.setExportConfiguration=false
+          callableMode=true
+          devices.bus={kind='me_exportbus',
+            exportIntoSlot=function() error('EXPORT FORBIDDEN') end,
+            setExportConfiguration=function() error('CONFIG CHANGE FORBIDDEN') end,
+            getExportConfiguration=function(side) if side==0 then return {} end return nil,'no export bus' end}
+          devices.db={kind='database',get=function() return nil end}
+        """, "me")
+        self.assertIn("ME export-bus components (not network readers): 1", text)
+        self.assertIn("export side 0 (down)", text)
+        self.assertIn("OC databases: 1", text)
+        self.assertIn("X1 me_exportbus bus", text)
+        self.assertIn("D1 database db", text)
+        self.assertEqual(list(lua.globals().networkCalls.values()), [])
+
     def test_synchronized_me_method_is_still_available(self):
         text, _, _ = self.run_script("""
           methodFlags.getItemsInNetwork=false
