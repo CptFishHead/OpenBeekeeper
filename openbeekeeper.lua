@@ -1,5 +1,7 @@
--- OpenBeekeeper 0.11.7: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.12.0: unattended bee genetics with exact database references.
 local component = require("component")
+local print=print -- Dashboard captures only this program, never global shell output.
+local dashboard
 local args = {...}
 local command = args[1] or "scan"
 local sideNames = {[0]="down", "up", "north", "south", "west", "east"}
@@ -57,7 +59,15 @@ local function readME(entry,force)
     if last and now-last<ME_INTERVAL then
       local remaining=ME_INTERVAL-(now-last)
       print("ME cooldown: waiting "..math.ceil(remaining).." seconds...")
-      os.sleep(remaining)
+      if dashboard then
+        local event=require('event')
+        local deadline=computer.uptime()+remaining
+        while computer.uptime()<deadline do
+          dashboard.pollUpdate(); dashboard.render()
+          assert(not dashboard.stopRequested,'Stopped from dashboard')
+          assert(event.pull(math.min(0.2,deadline-computer.uptime()))~='interrupted','Paused by Ctrl+C')
+        end
+      else os.sleep(remaining) end
     end
     if not fs.exists(directory) then assert(fs.makeDirectory(directory)) end
     local file=assert(io.open(clockPath,"w"))
@@ -879,6 +889,201 @@ local function climateCommand()
   print('Emulator climate is computed from installed client rules; altitude/server changes may require a GUI-confirmed override.')
   print('No bee or upgrade moved. Breeding apiaries also accept queens when their configured climate matches.')
 end
+-- OpenOS dashboard; event callbacks only record intent. Machine work stays serial.
+local function newDashboard()
+  local term=require('term')
+  local unicode=require('unicode')
+  local event=require('event')
+  local computer=require('computer')
+  local gpu=assert(component.gpu,'GPU unavailable')
+  assert(term.isAvailable(),'Terminal unavailable')
+  local w,h=gpu.getResolution()
+  local originalW,originalH=w,h
+  -- A 5x5 screen is square; character cells are approximately 1:2.
+  if gpu.maxResolution and gpu.setResolution then
+    local maxW,maxH=gpu.maxResolution()
+    local squareW=math.min(maxW,maxH*2)
+    if squareW>=60 and maxH>=30 then w,h=squareW,maxH; gpu.setResolution(w,h) end
+  end
+  assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
+  local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.12.0'):gsub('%s+$','')}
+  local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
+    ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
+  local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
+  local blink=term.getCursorBlink and term.getCursorBlink()
+  term.setCursorBlink(false)
+  local painted={}
+  local function short(s,n) return unicode.sub(tostring(s or ''),1,math.max(0,n)) end
+  local function line(y,s,fg,bg)
+    s=short(s,w); fg=fg or 0xF4E9B6; bg=bg or 0x18160F
+    local old=painted[y]
+    if old and old[1]==s and old[2]==fg and old[3]==bg then return end
+    gpu.setBackground(bg); gpu.setForeground(fg)
+    gpu.fill(1,y,w,1,' ')
+    if bg==0x18160F then
+      local tile=honey[(y-1)%#honey+1]
+      gpu.setForeground(0x342C16)
+      gpu.set(1,y,short(string.rep(tile,math.ceil(w/unicode.len(tile))),w))
+      gpu.setForeground(fg)
+    end
+    gpu.set(1,y,s)
+    painted[y]={s,fg,bg}
+  end
+  local function machine(key)
+    local address,side=tostring(key):match('^(.-):(%d+)$')
+    return (address or tostring(key)):sub(1,8)..(side and ':'..side or '')
+  end
+  local function label(uid) return tostring(uid or '?'):gsub('^forestry%.species','') end
+  function ui.log(...)
+    local parts={}; for i=1,select('#',...) do parts[i]=tostring(select(i,...)) end
+    local text=table.concat(parts,' ')
+    for row in (text..'\n'):gmatch('(.-)\n') do
+      local length=unicode.len(row)
+      for pos=1,math.max(1,length),w do
+        ui.logs[#ui.logs+1]=unicode.sub(row,pos,pos+w-1)
+        if #ui.logs>250 then table.remove(ui.logs,1) end
+      end
+    end
+    ui.dirty=true
+    if ui.render and computer.uptime()-(ui.lastDraw or -1)>=0.2 then ui.render() end
+  end
+  function ui.stop(action,commandLine)
+    ui.action=action or 'stop'; ui.commandLine=commandLine; ui.stopRequested=true
+  end
+  local function submit()
+    local text=ui.input:match('^%s*(.-)%s*$'); ui.input=''
+    if text=='' then return end
+    ui.log('> '..text)
+    if text=='help' then ui.log('status | check-update | update | exit | any OpenOS command (stops auto first)')
+    elseif text=='status' then ui.log(ui.summary or 'Starting automation')
+    elseif text=='check-update' then ui.checkPending=true
+    elseif text=='exit' or text=='stop' then ui.stop()
+    elseif text=='update' or text=='bees update' then ui.stop('update','bees update')
+    else ui.stop('command',text) end
+  end
+  local function listen(name,handler)
+    assert(event.listen(name,handler),'Cannot register '..name)
+    ui.listeners[#ui.listeners+1]={name,handler}
+  end
+  local function closeRequest()
+    if ui.request then pcall(ui.request.close); ui.request=nil end
+  end
+  function ui.pollUpdate()
+    if ui.checkPending and not ui.request then
+      ui.checkPending=false
+      local ok,request=pcall(function()
+        assert(component.isAvailable('internet'),'Internet card unavailable')
+        return assert(component.internet.request('https://raw.githubusercontent.com/CptFishHead/OpenBeekeeper/main/VERSION?fresh='..math.floor(computer.uptime())))
+      end)
+      if ok then
+        ui.request=request; ui.requestSince=computer.uptime(); ui.response=''; ui.updateText='Updates: checking...'
+      else ui.updateText='Updates: '..tostring(request) end
+    end
+    if not ui.request then return end
+    local ok,err=pcall(function()
+      assert(computer.uptime()-ui.requestSince<15,'check timed out')
+      if ui.request.finishConnect and not ui.request.finishConnect() then return end
+      if ui.request.response then
+        local status=ui.request.response(); assert(status==200,'HTTP '..tostring(status))
+      end
+      local chunk,reason=ui.request.read(128)
+      assert(not reason,reason)
+      if chunk then
+        ui.response=ui.response..chunk; assert(#ui.response<=128,'oversized VERSION')
+      else
+        local remote=ui.response:match('^%s*(%d+%.%d+%.%d+)%s*$')
+        assert(remote,'invalid VERSION')
+        ui.updateText=remote==ui.version and ('Updates: up to date ('..remote..')') or ('Repository version: '..remote..' | installed: '..ui.version)
+        closeRequest()
+      end
+    end)
+    if not ok then closeRequest(); ui.updateText='Updates: '..tostring(err) end
+  end
+  function ui.render(st)
+    if st then ui.state=st end
+    st=ui.state or {flows={},apiaries={}}
+    local width,height=gpu.getResolution()
+    if width~=w or height~=h then painted={} end
+    w,h=width,height
+    assert(w>=60 and h>=18,'Dashboard resized below 60x18')
+    ui.taskEnd=math.min(h-9,math.max(9,math.floor(h*0.45)))
+    ui.logStart=ui.taskEnd+2
+    local rows={}; local ids={}
+    for id in pairs(st.flows or {}) do ids[#ids+1]=id end
+    table.sort(ids,function(a,b) return (tonumber(a) or 0)<(tonumber(b) or 0) end)
+    for _,id in ipairs(ids) do
+      local f=st.flows[id]
+      rows[#rows+1]='#'..id..' '..f.mode..' '..label(f.target)..' | '..tostring(f.steps[f.step] or 'complete')
+        ..' | '..(f.op and (machine(f.op.key)..' '..f.op.phase) or 'queued')..(f.wait and (' | '..f.wait) or '')
+    end
+    local active=0; local keys={}
+    for key in pairs(st.apiaries or {}) do keys[#keys+1]=key end; table.sort(keys)
+    for _,key in ipairs(keys) do
+      active=active+1; rows[#rows+1]='Apiary '..machine(key)..' | '..label(st.apiaries[key].uid)..' | running'
+    end
+    local seconds=math.max(0,math.floor(computer.uptime()-ui.started))
+    local time=string.format('%02d:%02d:%02d',math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
+    ui.summary='Tasks: '..#ids..' | Apiaries: '..active..' | Cycles: '..(st.cycles or 0)..' | Mutations: '..(st.mutations or 0)..' | Samples: '..(st.samples or 0)
+    line(1,' OpenBeekeeper '..ui.version..' | Uptime '..time,0x1B160A,0xE0A52B)
+    line(2,ui.summary)
+    line(3,' [ Stop ]  [ Check update ]  [ Update ]',0xFFE28A,0x5C4516)
+    line(4,ui.updateText,0xD1BA74)
+    line(5,' CURRENT TASKS ('..#rows..') - scroll here to browse',0xFFE28A)
+    local taskHeight=ui.taskEnd-5
+    ui.taskOffset=math.max(0,math.min(ui.taskOffset,math.max(0,#rows-taskHeight)))
+    for y=6,ui.taskEnd do line(y,rows[ui.taskOffset+y-5] or '') end
+    line(ui.taskEnd+1,' LOG '..(ui.offset>0 and '(scroll paused)' or '(live)'),0xFFE28A)
+    local logHeight=h-2-ui.logStart
+    ui.offset=math.max(0,math.min(ui.offset,math.max(0,#ui.logs-logHeight)))
+    local first=math.max(1,#ui.logs-ui.offset-logHeight+1)
+    for y=ui.logStart,h-3 do line(y,ui.logs[first+y-ui.logStart] or '',0xE4D9AA) end
+    line(h-2,'Enter command | help | Ctrl+C: stop | Other commands stop auto first',0xD1BA74)
+    line(h-1,'> '..unicode.sub(ui.input,math.max(1,unicode.len(ui.input)-w+4)),0xFFF3C4,0x3D3115)
+    line(h,' Stop/update preserve the queue; bees auto resumes.',0xD1BA74)
+    ui.dirty=false; ui.lastDraw=computer.uptime()
+  end
+  local ok,err=pcall(function()
+    listen('interrupted',function() ui.stop(); return true end)
+    listen('touch',function(_,screen,x,y)
+      if screen~=gpu.getScreen() then return true end
+      if y==3 then
+        if x<=9 then ui.stop()
+        elseif x<=27 then ui.checkPending=true
+        elseif x<=39 then ui.stop('update','bees update') end
+      end
+      return true
+    end)
+    listen('scroll',function(_,screen,x,y,direction)
+      if screen~=gpu.getScreen() then return true end
+      if y>=6 and y<= (ui.taskEnd or 9) then ui.taskOffset=math.max(0,ui.taskOffset-direction*3)
+      elseif y>= (ui.logStart or 11) then ui.offset=math.max(0,ui.offset+direction*3) end
+      return true
+    end)
+    listen('key_down',function(_,address,char,code)
+      if char==3 then ui.stop()
+      elseif code==28 then submit()
+      elseif code==14 then ui.input=unicode.sub(ui.input,1,-2)
+      elseif code==201 then ui.offset=ui.offset+5
+      elseif code==209 then ui.offset=math.max(0,ui.offset-5)
+      elseif char and char>=32 and unicode.len(ui.input)<512 then ui.input=ui.input..unicode.char(char) end
+      return true
+    end)
+    listen('clipboard',function(_,address,value)
+      ui.input=short(ui.input..tostring(value):gsub('[%c]',' '),512); return true
+    end)
+  end)
+  function ui.close()
+    closeRequest()
+    for _,entry in ipairs(ui.listeners) do pcall(event.ignore,entry[1],entry[2]) end
+    if gpu.setResolution then gpu.setResolution(originalW,originalH) end
+    gpu.setBackground(oldBG); gpu.setForeground(oldFG)
+    term.clear(); term.setCursor(1,1)
+    if blink~=nil then term.setCursorBlink(blink) end
+  end
+  if not ok then ui.close(); error(err) end
+  return ui
+end
 -- Embedded in openbeekeeper.lua by tools/embed_automation.py; no runtime module dependency.
 local function automate()
   local fs=require("filesystem")
@@ -1202,7 +1407,12 @@ local function automate()
     end
   end
   local function tick()
+    if dashboard then
+      dashboard.pollUpdate(); dashboard.render(st)
+      assert(not dashboard.stopRequested,'Stopped from dashboard')
+    end
     assert(event.pull(1)~="interrupted","Paused by Ctrl+C; bees auto resumes")
+    assert(not dashboard or not dashboard.stopRequested,'Stopped from dashboard')
   end
   local function db(ref) return component.proxy(ref.database) end
   local function allocate()
@@ -1287,6 +1497,7 @@ local function automate()
         end
       end
     end
+    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
     intention.armed=true; save()
     local v=call(m.module.t.getStackInSlot,m.module.source,source)
     local moved=call(m.module.t.transferItem,m.module.source,m.side,v.size,source,destination)
@@ -1501,6 +1712,7 @@ local function automate()
   end
   local deliveryRetry={}
   local function serviceFlow()
+    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
     local f=flow; if not f then return end
     if f.reselect then
       if st.needFresh then return end
@@ -1924,6 +2136,10 @@ local function automate()
     assert(flowLimit>0,'No usable job capacity; check modules and free OC database entries')
     for _,f in pairs(st.flows) do if f.op then assert(machines[f.op.key],'Saved processor is missing; resolve existing work before changing modules') end end
     while true do
+      if dashboard then
+        dashboard.pollUpdate(); dashboard.render(st)
+        assert(not dashboard.stopRequested,'Stopped from dashboard')
+      end
       availability={}
       serviceUnowned()
       serviceApiaries()
@@ -1963,7 +2179,9 @@ local function automate()
   end
   local ok,err=pcall(perform)
   if not ok then
+    if dashboard then dashboard.cleaning=true end
     local cleaned,cleanupError=pcall(cleanLease)
+    if dashboard then dashboard.safeToRun=cleaned end
     print('AUTO PAUSED: '..tostring(err))
     if not cleaned then print('Request cleanup pending: '..tostring(cleanupError)) end
     print('Loaded inputs and exact references preserved. Fix the error, then bees auto.')
@@ -1977,9 +2195,37 @@ if command=="zones" then
   local ok,err=pcall(climateCommand)
   if not ok then print('Climate configuration failed: '..tostring(err)); return false end
   return true
-elseif command=="auto" or command=="run" then
+elseif command=="auto" or command=="run" or command=="ui" then
+  if command=='ui' then command='auto'; args[1]='auto' end
+  local consolePrint=print
+  local plain=args[2]=='log'
+  if plain then args[2]=nil end
+  if not plain and (args[2]==nil or args[2]=='resume') then
+    local available,ui=pcall(newDashboard)
+    if available then
+      local drawn=pcall(ui.render)
+      if drawn then dashboard=ui; print=ui.log else pcall(ui.close) end
+    end
+  end
   local ok,result=pcall(automate)
-  if not ok then print("AUTO NOT STARTED: "..tostring(result)); return false end
+  if not ok then print("AUTO NOT STARTED: "..tostring(result)); result=false end
+  if dashboard then
+    local ui=dashboard
+    pcall(ui.close); dashboard=nil; print=consolePrint
+    if ui.stopRequested and ui.safeToRun then result=true end
+    if not ui.stopRequested then
+      for i=math.max(1,#ui.logs-7),#ui.logs do print(ui.logs[i]) end
+    end
+    if ui.commandLine then
+      if ui.safeToRun then
+        print('Automation paused. Running: '..ui.commandLine)
+        return require('shell').execute(ui.commandLine)
+      end
+      print('Command not run: interface cleanup failed; inspect bees auto status first.')
+      return false
+    end
+    print('Automation paused; queue preserved. bees auto resumes.')
+  end
   return result
 elseif command=="plan" then
   local ok,err=pcall(collectionPlan)
@@ -2298,6 +2544,6 @@ elseif command=="map" or command=="owned" then
   print("Preview is not the full species list. Use bees owned for collected entries only.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | plan | auto [resume/status/check/config/reset] | run [resume/status/check/config/reset] | bind | bind-reset | modules | interface-test | interface-reset")
+  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | plan | ui | auto [log/resume/status/check/config/reset] | run [resume/status/check/config/reset] | bind | bind-reset | modules | interface-test | interface-reset")
 end
 print("Read-only. No items moved.")

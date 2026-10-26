@@ -14,7 +14,7 @@ def build_body():
         assert all(isinstance(v,str) and v.replace('_','').replace('.','').isalnum() for v in (uid,*values))
         lines.append('  ["'+uid+'"]={"'+values[0]+'","'+values[1]+'"},')
     lines.append('}\n')
-    return '\n'.join(lines)+(ROOT/'src/climate.lua').read_text(encoding='utf-8')+(ROOT/'src/automation.lua').read_text(encoding='utf-8')
+    return '\n'.join(lines)+(ROOT/'src/climate.lua').read_text(encoding='utf-8')+(ROOT/'src/dashboard.lua').read_text(encoding='utf-8')+(ROOT/'src/automation.lua').read_text(encoding='utf-8')
 
 
 def embed():

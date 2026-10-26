@@ -321,7 +321,12 @@ local function automate()
     end
   end
   local function tick()
+    if dashboard then
+      dashboard.pollUpdate(); dashboard.render(st)
+      assert(not dashboard.stopRequested,'Stopped from dashboard')
+    end
     assert(event.pull(1)~="interrupted","Paused by Ctrl+C; bees auto resumes")
+    assert(not dashboard or not dashboard.stopRequested,'Stopped from dashboard')
   end
   local function db(ref) return component.proxy(ref.database) end
   local function allocate()
@@ -406,6 +411,7 @@ local function automate()
         end
       end
     end
+    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
     intention.armed=true; save()
     local v=call(m.module.t.getStackInSlot,m.module.source,source)
     local moved=call(m.module.t.transferItem,m.module.source,m.side,v.size,source,destination)
@@ -620,6 +626,7 @@ local function automate()
   end
   local deliveryRetry={}
   local function serviceFlow()
+    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
     local f=flow; if not f then return end
     if f.reselect then
       if st.needFresh then return end
@@ -1043,6 +1050,10 @@ local function automate()
     assert(flowLimit>0,'No usable job capacity; check modules and free OC database entries')
     for _,f in pairs(st.flows) do if f.op then assert(machines[f.op.key],'Saved processor is missing; resolve existing work before changing modules') end end
     while true do
+      if dashboard then
+        dashboard.pollUpdate(); dashboard.render(st)
+        assert(not dashboard.stopRequested,'Stopped from dashboard')
+      end
       availability={}
       serviceUnowned()
       serviceApiaries()
@@ -1082,7 +1093,9 @@ local function automate()
   end
   local ok,err=pcall(perform)
   if not ok then
+    if dashboard then dashboard.cleaning=true end
     local cleaned,cleanupError=pcall(cleanLease)
+    if dashboard then dashboard.safeToRun=cleaned end
     print('AUTO PAUSED: '..tostring(err))
     if not cleaned then print('Request cleanup pending: '..tostring(cleanupError)) end
     print('Loaded inputs and exact references preserved. Fix the error, then bees auto.')
