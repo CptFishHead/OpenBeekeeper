@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.12.0: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.12.1: unattended bee genetics with exact database references.
 local component = require("component")
 local print=print -- Dashboard captures only this program, never global shell output.
 local dashboard
@@ -907,7 +907,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.12.0'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.12.1'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -949,6 +949,8 @@ local function newDashboard()
     if ui.render and computer.uptime()-(ui.lastDraw or -1)>=0.2 then ui.render() end
   end
   function ui.stop(action,commandLine)
+    if ui.stopRequested then return end
+    ui.dirty=true
     ui.action=action or 'stop'; ui.commandLine=commandLine; ui.stopRequested=true
   end
   local function submit()
@@ -1027,8 +1029,8 @@ local function newDashboard()
     ui.summary='Tasks: '..#ids..' | Apiaries: '..active..' | Cycles: '..(st.cycles or 0)..' | Mutations: '..(st.mutations or 0)..' | Samples: '..(st.samples or 0)
     line(1,' OpenBeekeeper '..ui.version..' | Uptime '..time,0x1B160A,0xE0A52B)
     line(2,ui.summary)
-    line(3,' [ Stop ]  [ Check update ]  [ Update ]',0xFFE28A,0x5C4516)
-    line(4,ui.updateText,0xD1BA74)
+    line(3,ui.stopRequested and ' [ Stopping... ]' or ' [ Stop ]  [ Check update ]  [ Update ]',0xFFE28A,0x5C4516)
+    line(4,ui.stopRequested and 'Finishing the current transfer and clearing ME requests...' or ui.updateText,0xD1BA74)
     line(5,' CURRENT TASKS ('..#rows..') - scroll here to browse',0xFFE28A)
     local taskHeight=ui.taskEnd-5
     ui.taskOffset=math.max(0,math.min(ui.taskOffset,math.max(0,#rows-taskHeight)))
@@ -1042,6 +1044,24 @@ local function newDashboard()
     line(h-1,'> '..unicode.sub(ui.input,math.max(1,unicode.len(ui.input)-w+4)),0xFFF3C4,0x3D3115)
     line(h,' Stop/update preserve the queue; bees auto resumes.',0xD1BA74)
     ui.dirty=false; ui.lastDraw=computer.uptime()
+  end
+  function ui.pump()
+    if ui.pumping then return end
+    ui.pumping=true
+    -- OpenOS dispatches listeners through computer.pullSignal. Drain queued
+    -- input without sleeping, even while the executor is visiting many devices.
+    if computer.pullSignal and computer.uptime()>=(ui.nextInputPoll or 0) then
+      ui.nextInputPoll=computer.uptime()+0.1
+      for _=1,32 do
+        if not computer.pullSignal(0) then break end
+        ui.dirty=true
+      end
+    end
+    ui.pumping=nil
+    if (ui.stopRequested and not ui.stopPainted)
+        or (ui.dirty and computer.uptime()-(ui.lastDraw or -1)>=0.1) then
+      ui.render(); ui.stopPainted=ui.stopRequested
+    end
   end
   local ok,err=pcall(function()
     listen('interrupted',function() ui.stop(); return true end)
@@ -1094,6 +1114,10 @@ local function automate()
   local path=dir.."automation"
   local optionsPath=dir..'automation-options'
   local function call(method,...)
+    if dashboard then
+      dashboard.pump()
+      if dashboard.stopRequested and not dashboard.critical and not dashboard.cleaning then error('Stopped from dashboard') end
+    end
     local value,err=read(method,...); assert(not err,err); return value
   end
   local function parse(text,schema)
@@ -1497,7 +1521,11 @@ local function automate()
         end
       end
     end
-    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
+    if dashboard then
+      dashboard.pump()
+      assert(not dashboard.stopRequested,'Stopped from dashboard')
+      dashboard.critical=true
+    end
     intention.armed=true; save()
     local v=call(m.module.t.getStackInSlot,m.module.source,source)
     local moved=call(m.module.t.transferItem,m.module.source,m.side,v.size,source,destination)
@@ -1509,6 +1537,7 @@ local function automate()
       save()
     end
     cleanLease(interface)
+    if dashboard then dashboard.critical=nil end
     return moved>0
   end
   local function reference(v)
@@ -1712,7 +1741,7 @@ local function automate()
   end
   local deliveryRetry={}
   local function serviceFlow()
-    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
+    if dashboard then dashboard.pump(); assert(not dashboard.stopRequested,'Stopped from dashboard') end
     local f=flow; if not f then return end
     if f.reselect then
       if st.needFresh then return end
@@ -2179,7 +2208,7 @@ local function automate()
   end
   local ok,err=pcall(perform)
   if not ok then
-    if dashboard then dashboard.cleaning=true end
+    if dashboard then dashboard.cleaning=true; dashboard.critical=nil end
     local cleaned,cleanupError=pcall(cleanLease)
     if dashboard then dashboard.safeToRun=cleaned end
     print('AUTO PAUSED: '..tostring(err))

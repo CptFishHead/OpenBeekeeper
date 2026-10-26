@@ -8,6 +8,10 @@ local function automate()
   local path=dir.."automation"
   local optionsPath=dir..'automation-options'
   local function call(method,...)
+    if dashboard then
+      dashboard.pump()
+      if dashboard.stopRequested and not dashboard.critical and not dashboard.cleaning then error('Stopped from dashboard') end
+    end
     local value,err=read(method,...); assert(not err,err); return value
   end
   local function parse(text,schema)
@@ -411,7 +415,11 @@ local function automate()
         end
       end
     end
-    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
+    if dashboard then
+      dashboard.pump()
+      assert(not dashboard.stopRequested,'Stopped from dashboard')
+      dashboard.critical=true
+    end
     intention.armed=true; save()
     local v=call(m.module.t.getStackInSlot,m.module.source,source)
     local moved=call(m.module.t.transferItem,m.module.source,m.side,v.size,source,destination)
@@ -423,6 +431,7 @@ local function automate()
       save()
     end
     cleanLease(interface)
+    if dashboard then dashboard.critical=nil end
     return moved>0
   end
   local function reference(v)
@@ -626,7 +635,7 @@ local function automate()
   end
   local deliveryRetry={}
   local function serviceFlow()
-    if dashboard and dashboard.stopRequested then error('Stopped from dashboard') end
+    if dashboard then dashboard.pump(); assert(not dashboard.stopRequested,'Stopped from dashboard') end
     local f=flow; if not f then return end
     if f.reselect then
       if st.needFresh then return end
@@ -1093,7 +1102,7 @@ local function automate()
   end
   local ok,err=pcall(perform)
   if not ok then
-    if dashboard then dashboard.cleaning=true end
+    if dashboard then dashboard.cleaning=true; dashboard.critical=nil end
     local cleaned,cleanupError=pcall(cleanLease)
     if dashboard then dashboard.safeToRun=cleaned end
     print('AUTO PAUSED: '..tostring(err))

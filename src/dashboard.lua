@@ -16,7 +16,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.12.0'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.12.1'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -58,6 +58,8 @@ local function newDashboard()
     if ui.render and computer.uptime()-(ui.lastDraw or -1)>=0.2 then ui.render() end
   end
   function ui.stop(action,commandLine)
+    if ui.stopRequested then return end
+    ui.dirty=true
     ui.action=action or 'stop'; ui.commandLine=commandLine; ui.stopRequested=true
   end
   local function submit()
@@ -136,8 +138,8 @@ local function newDashboard()
     ui.summary='Tasks: '..#ids..' | Apiaries: '..active..' | Cycles: '..(st.cycles or 0)..' | Mutations: '..(st.mutations or 0)..' | Samples: '..(st.samples or 0)
     line(1,' OpenBeekeeper '..ui.version..' | Uptime '..time,0x1B160A,0xE0A52B)
     line(2,ui.summary)
-    line(3,' [ Stop ]  [ Check update ]  [ Update ]',0xFFE28A,0x5C4516)
-    line(4,ui.updateText,0xD1BA74)
+    line(3,ui.stopRequested and ' [ Stopping... ]' or ' [ Stop ]  [ Check update ]  [ Update ]',0xFFE28A,0x5C4516)
+    line(4,ui.stopRequested and 'Finishing the current transfer and clearing ME requests...' or ui.updateText,0xD1BA74)
     line(5,' CURRENT TASKS ('..#rows..') - scroll here to browse',0xFFE28A)
     local taskHeight=ui.taskEnd-5
     ui.taskOffset=math.max(0,math.min(ui.taskOffset,math.max(0,#rows-taskHeight)))
@@ -151,6 +153,24 @@ local function newDashboard()
     line(h-1,'> '..unicode.sub(ui.input,math.max(1,unicode.len(ui.input)-w+4)),0xFFF3C4,0x3D3115)
     line(h,' Stop/update preserve the queue; bees auto resumes.',0xD1BA74)
     ui.dirty=false; ui.lastDraw=computer.uptime()
+  end
+  function ui.pump()
+    if ui.pumping then return end
+    ui.pumping=true
+    -- OpenOS dispatches listeners through computer.pullSignal. Drain queued
+    -- input without sleeping, even while the executor is visiting many devices.
+    if computer.pullSignal and computer.uptime()>=(ui.nextInputPoll or 0) then
+      ui.nextInputPoll=computer.uptime()+0.1
+      for _=1,32 do
+        if not computer.pullSignal(0) then break end
+        ui.dirty=true
+      end
+    end
+    ui.pumping=nil
+    if (ui.stopRequested and not ui.stopPainted)
+        or (ui.dirty and computer.uptime()-(ui.lastDraw or -1)>=0.1) then
+      ui.render(); ui.stopPainted=ui.stopRequested
+    end
   end
   local ok,err=pcall(function()
     listen('interrupted',function() ui.stop(); return true end)

@@ -82,6 +82,35 @@ class DashboardTests(unittest.TestCase):
         for config in lua.globals().configurations.values():
             self.assertIsNone(config[9])
 
+    def test_queued_stop_is_dispatched_between_callbacks_before_next_transfer(self):
+        setup=r'''
+          add('a','drone',17)
+          local queue={}
+          require('computer').pullSignal=function(timeout)
+            assert(timeout==0,'INPUT PUMP MUST NOT SLEEP')
+            local signal=table.remove(queue,1)
+            if not signal then return nil end
+            uiHandlers[signal[1]](table.unpack(signal))
+            return table.unpack(signal)
+          end
+          local request=devices.if5.setInterfaceConfiguration
+          devices.if5.setInterfaceConfiguration=function(slot,address,index,count)
+            local result=request(slot,address,index,count)
+            if address then clock=clock+0.5 end -- OC interface configuration yields for 0.5s.
+            if address and not queuedStop then
+              queuedStop=true; queue[#queue+1]={'touch','screen',3,3}
+            end
+            return result
+          end
+        '''
+        text, _, lua=self.launch(setup)
+        self.assertTrue(lua.globals().queuedStop)
+        self.assertLessEqual(lua.globals().clock,2)
+        self.assertEqual(len(list(lua.globals().visits.values())),0)
+        self.assertIsNone(lua.globals().configurations[5][9])
+        self.assertTrue(any('Stopping...' in row.text for row in lua.globals().uiHistory.values()))
+        self.assertIn('Automation paused; queue preserved',text)
+
     def test_exit_during_armed_transfer_finishes_transfer_before_stopping(self):
         setup=r'''
           add('a','drone',17); stallProcessor='analyzer'
@@ -126,6 +155,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_update_check_is_nonblocking_and_does_not_install(self):
         setup=r'''
+          stateFiles['/home/.openbeekeeper/VERSION']='0.12.0\n'
           local component=require('component'); local available=component.isAvailable
           component.isAvailable=function(kind) return kind=='internet' or available(kind) end
           local chunks={'0.12.1\n'}; local reads=0
