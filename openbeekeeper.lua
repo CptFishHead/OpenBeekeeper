@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.10.0: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.10.1: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -1561,7 +1561,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.10.0 - read-only discovery")
+  print("OpenBeekeeper 0.10.1 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
