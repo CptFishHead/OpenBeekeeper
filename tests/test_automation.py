@@ -338,6 +338,51 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(lua.globals().stock['a:drone'].size, 34)
         self.assertEqual(len([r for r in lua.globals().loaded.values() if r.slot==2]), 1)
 
+    def test_unowned_outputs_and_orphan_drone_are_returned_without_reloading(self):
+        setup=r'''
+          apiaries[1][2][2]=beeStack('a','drone',1)
+          processors[6][4]=beeStack('b','drone',1)
+          local move=devices.t1.transferItem
+          devices.t1.transferItem=function(from,to,count,slot,destination)
+            if from==2 and slot==2 then
+              assert(not apiaries[1][2][1]); add('a','drone',count); apiaries[1][2][2]=nil; return count
+            end
+            return move(from,to,count,slot,destination)
+          end
+          stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=3
+        '''
+        text, _, lua=self.execute(setup)
+        self.assertIsNone(lua.globals().apiaries[1][2][2])
+        self.assertIsNone(lua.globals().processors[6][4])
+        self.assertEqual(lua.globals().stock['a:drone'].size,1)
+        self.assertEqual(lua.globals().stock['b:drone'].size,1)
+        self.assertEqual(len(list(lua.globals().loaded.values())),0)
+        self.assertIn('Paused by Ctrl+C',text)
+
+    def test_blocked_princess_releases_drone_and_apiary_for_retry(self):
+        setup=r'''
+          add('a','princess',1); add('a','drone',31); stock.ga=sample('a')
+          failPrincess=true; interruptAt=40
+          for n=1,4 do
+            local module=n; local move=devices['t'..n].transferItem
+            devices['t'..n].transferItem=function(from,to,count,slot,destination)
+              if from~=1 and slot==2 then
+                assert(not apiaries[module][from][1]); add('a','drone',count)
+                apiaries[module][from][2]=nil; return count
+              end
+              return move(from,to,count,slot,destination)
+            end
+          end
+        '''
+        text, _, lua=self.execute(setup)
+        self.assertIn('releasing unstarted work',text)
+        for group in lua.globals().apiaries.values():
+            for apiary in group.values():
+                self.assertIsNone(apiary[2])
+        lua.execute('failPrincess=false; interruptAt=clock+50')
+        self.invoke_auto(lua,action='resume')
+        self.assertEqual(lua.globals().stock['a:drone'].size,34)
+
     def test_status_is_read_only(self):
         _, _, lua=self.execute("add('a','drone',33); interruptAt=3; stallProcessor='analyzer'")
         calls=len(list(lua.globals().networkCalls.values())); visits=len(list(lua.globals().visits.values()))

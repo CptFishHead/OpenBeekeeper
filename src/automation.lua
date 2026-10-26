@@ -266,6 +266,17 @@ local function automate()
   if zones.unassigned>0 then print('Unassigned apiaries do not run; configure bees zones before starting.') end
   if args[2]=='check' then
     for _,m in pairs(machines) do
+      local slots={}
+      local last=m.kind=='apiary' and 15 or m.kind=='analyzer' and 12 or 4
+      for slot=1,last do
+        local v=call(m.module.t.getStackInSlot,m.side,slot)
+        if alive(v) then slots[#slots+1]=slot..'='..tostring(v.label or v.name)..' x'..v.size end
+      end
+      local owner=st.apiaries[m.key] and 'apiary cycle' or 'none'
+      for id,f in pairs(st.flows) do
+        if f.op and f.op.key==m.key then owner='flow '..id..' '..f.op.phase end
+      end
+      print('INVENTORY',m.kind,m.key,#slots>0 and table.concat(slots,'; ') or 'empty','owner='..owner)
       if m.kind=='imprinter' then
         local template=call(m.module.t.getStackInSlot,m.side,1)
         if not alive(template) or template.name~='gendustry:gene_template' then print('MISSING template at '..m.key) end
@@ -538,11 +549,39 @@ local function automate()
     if moved>0 then adjust(v,moved); print("RETURN",m.kind,moved,v.label or v.name) end
     return not alive(item(m,slot))
   end
+  local function flowOwns(key)
+    for _,f in pairs(st.flows) do if f.op and f.op.key==key then return true end end
+    return false
+  end
+  -- Output slots and leftover drones do not imply an active machine job.
+  -- Never touch the drone while a flow is still loading its princess.
+  local function serviceUnowned()
+    for _,m in pairs(machines) do
+      if not flowOwns(m.key) and not st.apiaries[m.key] then
+        local lo,hi=outputSlots(m.kind)
+        for slot=lo,hi do returnSlot(m,slot) end
+        if m.kind=='apiary' then
+          local parent=item(m,1)
+          if not alive(parent) then
+            local _,kind=bee(item(m,2) or {})
+            if kind=='drone' then returnSlot(m,2) end
+          else
+            local uid,kind=bee(parent)
+            if kind=='queen' then st.apiaries[m.key]={uid=uid,puid=uid}; save() end
+          end
+        end
+      end
+    end
+  end
   local function serviceApiaries()
     for key,job in pairs(st.apiaries) do
       local m=assert(machines[key],"Saved apiary is missing")
       local empty=true
       for slot=7,15 do if not returnSlot(m,slot) then empty=false end end
+      if not alive(item(m,1)) and not flowOwns(key) then
+        local _,kind=bee(item(m,2) or {})
+        if kind=='drone' and not returnSlot(m,2) then empty=false end
+      end
       if not alive(item(m,1)) and not alive(item(m,2)) and empty then
         st.apiaries[key]=nil; st.cycles=st.cycles+1; save()
         print("APIARY COMPLETE",key,job.uid)
@@ -599,12 +638,26 @@ local function automate()
     end
     local op=f.op; local m=assert(machines[op.key],"Saved processor is missing")
     if op.phase=='feeding' then
-      if not supplies(m) then return end
+      if not supplies(m) then
+        local started=false
+        for _,feed in ipairs(op.feeds) do if feed.armed or feed.loaded then started=true end end
+        if not started then f.op=nil; save() end
+        return
+      end
+      -- A mating pair cannot have started if its princess was never sent.
+      -- Recheck the staged drone instead of trusting a stale loaded flag.
+      if step=='mate' and not op.feeds[2].armed and not op.feeds[2].loaded then
+        local drone=op.feeds[1]
+        if drone.loaded and not alive(item(m,2)) then drone.loaded=nil; drone.armed=nil; save() end
+      end
       for _,feed in ipairs(op.feeds) do
         if not feed.loaded then
           local r=st.refs[feed.ref]; local v=item(m,feed.slot)
           if alive(v) then
-            assert(matches(v,r),"Unexpected bee in owned input")
+            local _,physicalKind=bee(v)
+            local mated=step=='mate' and feed.slot==1 and feed.armed and physicalKind=='queen'
+            assert(mated or matches(v,r),"Unexpected bee in owned input")
+            assert(feed.armed,"Input occupied before this flow loaded it; inspect bees auto check")
             feed.loaded=true; save()
           elseif feed.armed and not (step=='mate' and feed.slot==2 and not op.feeds[2].armed) then
             -- The triggering item may be internal/already output. Never replay it.
@@ -613,10 +666,23 @@ local function automate()
             local delivered,reason=deliver(m,feed.ref,feed.slot,feed.count or 1,feed)
             if delivered==nil then return end
             if not delivered then
+              op.blockedSince=op.blockedSince or computer.uptime(); save()
+              if not reason and computer.uptime()-op.blockedSince>=ME_INTERVAL then
+                reason='Input transfer remains blocked at '..m.key..' slot '..feed.slot..'; releasing unstarted work'
+              end
               if reason then
                 deliveryRetry[currentID]=computer.uptime()+ME_INTERVAL
                 local started=false
                 for _,input in ipairs(op.feeds) do if input.armed or input.loaded then started=true end end
+                if started and step=='mate' and feed.slot==1 and not feed.armed and not feed.loaded
+                    and not alive(item(m,1)) then
+                  local drone=op.feeds[1]
+                  if returnSlot(m,2) then
+                    drone.loaded=nil; drone.armed=nil
+                    local ref=st.refs[drone.ref]; ref.inME=true
+                    started=false; save()
+                  end
+                end
                 if not started then
                   -- Only a not-yet-processed parent may be reselected. Exact
                   -- outputs remain fixed to their captured database entry.
@@ -629,7 +695,7 @@ local function automate()
               end
               warn(reason or ("Input transfer blocked at "..m.key)); return
             end
-            deliveryRetry[currentID]=nil
+            deliveryRetry[currentID]=nil; op.blockedSince=nil
             feed.loaded=true; save()
           end
         end
@@ -932,6 +998,7 @@ local function automate()
     for _,f in pairs(st.flows) do if f.op then assert(machines[f.op.key],'Saved processor is missing; resolve existing work before changing modules') end end
     while true do
       availability={}
+      serviceUnowned()
       serviceApiaries()
       if computer.uptime()>=nextRead then
         local items,err=readME(me,true); assert(type(items)=='table',err or 'ME read failed')
