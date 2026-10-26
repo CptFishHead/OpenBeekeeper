@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.10.1: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.10.2: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -895,9 +895,11 @@ local function automate()
     print("AUTOMATION: apiary cycles="..st.cycles.."; sampled drones="..st.samples.."; mutations="..st.mutations)
     for id,f in pairs(st.flows) do print("FLOW",id,f.mode,f.target,"step="..f.step) end
     for key,job in pairs(st.apiaries) do print("APIARY",key,job.uid) end
+    if st.reset then print('RESET CLEANUP PENDING; use bees auto reset; archive: '..tostring(st.reset.archive)) end
     print(st.wait or "No resource wait recorded."); return true
   end
-  assert(args[2]==nil or args[2]=="resume","Use bees auto [resume/status]")
+  assert(args[2]==nil or args[2]=="resume" or args[2]=="reset","Use bees auto [resume/status/reset]")
+  assert(not st.reset or args[2]=="reset","Reset cleanup is pending; use bees auto reset before resuming")
   assert(not fs.exists(BIND_PENDING) and not fs.exists(pendingPath),"Finish bind/interface recovery first")
   local function save()
     if not fs.exists(dir) then assert(fs.makeDirectory(dir)) end
@@ -940,6 +942,102 @@ local function automate()
       local machine={key=key,module=module,side=side,kind=kind}
       machines[key]=machine; groups[kind][#groups[kind]+1]=machine
     end
+  end
+  if args[2]=='reset' then
+    local function refuse(reason)
+      error('RESET REFUSED: '..reason..'; use bees auto status and resume existing work with bees auto. Empty machines alone do not prove internal work finished.')
+    end
+    if st.lease or st.resource then refuse('unresolved interface lease/resource transfer') end
+    if next(st.apiaries) then refuse('active apiary ownership remains in the journal') end
+    for id,f in pairs(st.flows) do
+      local op=f.op
+      if op then
+        if op.phase~='feeding' or op.capture or op.handed then refuse('flow '..id..' may be processing internally') end
+        for _,feed in ipairs(op.feeds or {}) do
+          if feed.armed or feed.loaded then refuse('flow '..id..' has armed/loaded input') end
+        end
+      end
+    end
+    local legacy=readText(dir..'apiary-run.new') or readText(dir..'apiary-run')
+    if legacy and not parse(legacy,'APIARY1').finished then refuse('unfinished legacy apiary journal; resume/adopt it first') end
+    for _,module in pairs(modules) do
+      for slot=1,9 do
+        if call(module.m.getInterfaceConfiguration,slot)~=nil then refuse('active interface request '..module.interface..' slot '..slot) end
+        if alive(call(module.t.getStackInSlot,module.source,slot)) then refuse('occupied staging buffer '..module.interface..' slot '..slot) end
+      end
+    end
+    for _,m in pairs(machines) do
+      local slots=m.kind=='apiary' and {1,2,7,8,9,10,11,12,13,14,15}
+        or m.kind=='analyzer' and {1,3,4,5,6,7,8,9,10,11,12}
+        or m.kind=='mutatron' and {1,2,3} or {3,4}
+      for _,slot in ipairs(slots) do
+        if alive(call(m.module.t.getStackInSlot,m.side,slot)) then refuse('occupied '..m.kind..' '..m.key..' slot '..slot) end
+      end
+    end
+    local databases={}
+    for _,entry in ipairs(tools.databases) do databases[entry.address]=entry.proxy end
+    local occupied={}
+    for id,r in pairs(st.refs) do
+      if type(r)~='table' or not databases[r.database] or type(r.slot)~='number' or r.slot<1 or r.slot>81 or r.slot%1~=0 then refuse('invalid/missing owned database reference '..id) end
+      local key=r.database..':'..r.slot
+      if occupied[key] then refuse('duplicate owned database reference '..key) end
+      occupied[key]=true
+      local value=call(databases[r.database].get,r.slot)
+      if value~=nil then
+        local uid,kind=bee(value)
+        local matches=r.uid and uid==r.uid and kind==r.kind
+          or not r.uid and r.name and value.name==r.name and value.label==r.label
+        if not matches then refuse('owned database slot changed externally: '..key..'; preserve its descriptor') end
+      end
+    end
+    if st.lastResetArchive and not next(st.refs) and not next(st.flows) then
+      -- Repair an interrupted final backup write without revisiting old refs.
+      save()
+      local text=assert(readText(path))
+      writeText(path..'.bak',text); assert(readText(path..'.bak')==text,'Reset backup verification failed')
+      print('AUTO RESET already complete; archive: '..st.lastResetArchive); return true
+    end
+    if not st.reset then
+      local n=1
+      while fs.exists(path..'-reset-'..n..'.index') or fs.exists(path..'-reset-'..n..'.main') or fs.exists(path..'-reset-'..n..'.new') or fs.exists(path..'-reset-'..n..'.bak') do n=n+1 end
+      local archive=path..'-reset-'..n
+      if not fs.exists(dir) then assert(fs.makeDirectory(dir)) end
+      local rows={'OpenBeekeeper-automation-reset-1'}
+      for _,variant in ipairs({{path,'.main'},{path..'.new','.new'},{path..'.bak','.bak'}}) do
+        local text=readText(variant[1])
+        if text then
+          writeText(archive..variant[2],text)
+          assert(readText(archive..variant[2])==text,'Reset archive verification failed')
+          rows[#rows+1]=variant[2]
+        end
+      end
+      local index=table.concat(rows,'\n')..'\n'
+      writeText(archive..'.index',index); assert(readText(archive..'.index')==index,'Reset archive index verification failed')
+      st.reset={archive=archive}; save()
+    end
+    local reset=st.reset
+    assert(type(reset.archive)=='string' and fs.exists(reset.archive..'.index'),'Reset archive missing; preserve journal')
+    if reset.clearing then
+      local r=assert(st.refs[reset.clearing],'Reset reference missing')
+      if call(databases[r.database].get,r.slot)~=nil then refuse('interrupted database clear is ambiguous at '..r.database..':'..r.slot..'; inspect/archive the descriptor before manually clearing this slot') end
+      st.refs[reset.clearing]=nil; reset.clearing=nil; save()
+    end
+    local ids={}; for id in pairs(st.refs) do ids[#ids+1]=id end; table.sort(ids)
+    for _,id in ipairs(ids) do
+      local r=st.refs[id]
+      reset.clearing=id; save()
+      call(databases[r.database].clear,r.slot)
+      assert(call(databases[r.database].get,r.slot)==nil,'Could not clear owned database entry; reset remains pending')
+      st.refs[id]=nil; reset.clearing=nil; save()
+    end
+    st={schema='AUTO1',refs={},apiaries={},flows={},seq=0,cycles=0,samples=0,mutations=0,
+      network=me.address,migrated=true,climateRouting=true,lastResetArchive=reset.archive}
+    save()
+    local text=assert(readText(path))
+    writeText(path..'.bak',text); assert(readText(path..'.bak')==text,'Reset backup verification failed')
+    print('AUTO RESET complete; old journal archived at '..reset.archive..'.*')
+    print('Bindings, climate zones and ME roles preserved. Run bees auto to plan from current stock.')
+    return true
   end
   for _,kind in ipairs({'apiary','analyzer','imprinter','sampler','mutatron'}) do
     assert(#groups[kind]>0,"No bound "..kind.." (advanced mutatron selection is not supported)")
@@ -1028,7 +1126,7 @@ local function automate()
         end
       end
       if source then break end
-      assert(attempt<15,"Exact item not delivered within 15 seconds")
+      assert(attempt<15,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. bees auto status shows saved work; for an intentional restart with empty machines use bees auto reset.")
       tick()
     end
     intention.armed=true; save() -- Recovery must never blindly replay a triggering input.
@@ -1561,7 +1659,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.10.1 - read-only discovery")
+  print("OpenBeekeeper 0.10.2 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
@@ -1866,6 +1964,6 @@ elseif command=="map" or command=="owned" then
   print("Preview is not the full species list. Use bees owned for collected entries only.")
   for _,w in ipairs(warnings) do print("WARNING "..w) end
 else
-  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | plan | auto [resume/status] | run [resume/status] | bind | bind-reset | modules | interface-test | interface-reset")
+  print("Commands: scan | me | setup <ME number> | roles | catalog | probe <number/role> | map | owned | plan | auto [resume/status/reset] | run [resume/status/reset] | bind | bind-reset | modules | interface-test | interface-reset")
 end
 print("Read-only. No items moved.")

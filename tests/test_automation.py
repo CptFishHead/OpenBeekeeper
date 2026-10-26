@@ -510,6 +510,148 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),6)
         self.assertEqual(len([v for v in lua.globals().visits.values() if v.kind=='analyzer']),12)
 
+    def invoke_auto(self, lua, action='reset', command='auto'):
+        before = len(list(lua.globals().lines.values()))
+        lua.eval('function(src,cmd,action) return assert(load(src))(cmd,action) end')(runtime.SOURCE, command, action)
+        return '\n'.join(row.text for i,row in lua.globals().lines.items() if i>before)
+
+    def test_reset_stale_exact_request_archives_journals_and_preserves_configuration(self):
+        text, _, lua = self.execute("add('a','drone',33); noSupply=true; dbSlots[1]={name='unrelated',size=1}; interruptAt=50")
+        self.assertIn('Exact item not delivered within 15 seconds: a / drone', text)
+        self.assertIn('bees auto status', text)
+        self.assertIn('bees auto reset', text)
+        lua.execute("""
+          local p='/home/.openbeekeeper-data/automation'
+          stateFiles[p..'.new']=stateFiles[p]
+          stateFiles[p..'.bak']='distinct old backup'
+          for _,v in pairs(devices) do
+            if v.kind=='transposer' then v.transferItem=function() error('RESET MUST NOT MOVE ITEMS') end end
+          end
+          devices.me.getItemsInNetwork=function() error('RESET MUST NOT QUERY ME STOCK') end
+        """)
+        paths = ['/home/.openbeekeeper-data/'+name for name in ('modules','climate','roles')]
+        config = {p:lua.globals().stateFiles[p] for p in paths}
+        base = '/home/.openbeekeeper-data/automation'
+        old = {ext:lua.globals().stateFiles[base+ext] for ext in ('','.new','.bak')}
+        text = self.invoke_auto(lua)
+        self.assertIn('AUTO RESET complete', text)
+        for ext, archived in (('', '.main'), ('.new','.new'), ('.bak','.bak')):
+            self.assertEqual(lua.globals().stateFiles[base+'-reset-1'+archived],old[ext])
+        self.assertEqual({p:lua.globals().stateFiles[p] for p in paths}, config)
+        self.assertEqual(lua.globals().dbSlots[1].name, 'unrelated')
+        self.assertEqual(len(list(lua.globals().dbSlots.items())),1)
+        self.assertIsNone(lua.globals().stateFiles[base+'.new'])
+        self.assertEqual(lua.globals().stateFiles[base],lua.globals().stateFiles[base+'.bak'])
+        lua.execute("dbSlots[2]={name='reused-after-reset',size=1}")
+        self.assertIn('already complete',self.invoke_auto(lua,command='run'))
+        self.assertEqual(lua.globals().dbSlots[2].name,'reused-after-reset')
+        lua.execute("devices.me.getItemsInNetwork=function() return {} end; interruptAt=clock+3")
+        self.assertNotIn('Exact item not delivered',self.invoke_auto(lua,action='resume'))
+
+    def test_reset_replans_from_current_base_bees_instead_of_old_me_snapshot(self):
+        _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
+        self.assertIn('AUTO RESET complete',self.invoke_auto(lua))
+        lua.execute("stock['a:drone'].size=0; add('b','princess',1); add('b','drone',31); stock.gb=sample('b'); noSupply=false; interruptAt=clock+45")
+        text = self.invoke_auto(lua,action='resume')
+        self.assertIn('FLOW multiply b',text)
+        self.assertNotIn('FLOW sample a',text)
+        self.assertEqual(lua.globals().stock['b:drone'].size,34)
+
+    def test_completed_reset_repairs_interrupted_final_backup_without_clearing_reused_slots(self):
+        _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
+        lua.execute("""
+          local original=io.open
+          io.open=function(path,mode)
+            local file=original(path,mode)
+            if path=='/home/.openbeekeeper-data/automation.bak' and mode=='w' then
+              local write=file.write
+              file.write=function(self,text)
+                local s=serialValues[text]
+                if s and s.lastResetArchive and not s.reset and not failedBackup then
+                  failedBackup=true; error('crash final reset backup')
+                end
+                return write(self,text)
+              end
+            end
+            return file
+          end
+        """)
+        self.assertIn('crash final reset backup',self.invoke_auto(lua))
+        lua.execute("dbSlots[1]={name='reused-after-reset',size=1}")
+        self.assertIn('already complete',self.invoke_auto(lua))
+        base='/home/.openbeekeeper-data/automation'
+        self.assertEqual(lua.globals().stateFiles[base],lua.globals().stateFiles[base+'.bak'])
+        self.assertEqual(lua.globals().dbSlots[1].name,'reused-after-reset')
+
+    def test_reset_refuses_loaded_or_internal_processing_even_after_physical_input_disappears(self):
+        for hide_input in (False,True):
+            with self.subTest(internal=hide_input):
+                _, _, lua = self.execute("add('a','drone',33); stallProcessor='analyzer'; interruptAt=3")
+                if hide_input:
+                    lua.execute('processors[5]={}')
+                old = lua.globals().stateFiles['/home/.openbeekeeper-data/automation']
+                text = self.invoke_auto(lua)
+                self.assertIn('RESET REFUSED',text)
+                self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/automation'],old)
+                self.assertIsNone(lua.globals().stateFiles['/home/.openbeekeeper-data/automation-reset-1.index'])
+
+    def test_reset_refuses_occupied_machine_buffer_request_and_unresolved_ownership(self):
+        blockers = (
+            "processors[5][9]=beeStack('b','drone',1)",
+            "apiaries[1][2][1]=beeStack('b','queen',1)",
+            "bins[1][2]=beeStack('b','drone',1)",
+            "configurations[1][1]={name='unrelated',size=1}",
+            "s.apiaries['t1:2']={uid='b'}",
+            "s.lease={interface='if1'}",
+            "s.resource='missing'",
+            "for _,f in pairs(s.flows) do f.op.feeds[1].armed=true end",
+            "for _,f in pairs(s.flows) do f.op.feeds[1].loaded=true end",
+        )
+        for blocker in blockers:
+            with self.subTest(blocker=blocker):
+                _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
+                lua.execute("local p='/home/.openbeekeeper-data/automation'; local ser=require('serialization'); local s=ser.unserialize(stateFiles[p]); "+blocker+"; stateFiles[p]=ser.serialize(s)")
+                before = lua.globals().stateFiles['/home/.openbeekeeper-data/automation']
+                self.assertIn('RESET REFUSED',self.invoke_auto(lua))
+                self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/automation'],before)
+
+    def test_reset_archive_failure_leaves_journal_and_owned_database_untouched(self):
+        _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
+        base='/home/.openbeekeeper-data/automation'
+        before=lua.globals().stateFiles[base]
+        lua.execute("""
+          local original=io.open
+          io.open=function(path,mode)
+            if path:find('automation-reset-',1,true) and mode=='w' then return nil,'archive write failed' end
+            return original(path,mode)
+          end
+          devices.db.clear=function() error('DATABASE MUST NOT BE CLEARED BEFORE ARCHIVE') end
+        """)
+        self.assertNotIn('DATABASE MUST NOT',self.invoke_auto(lua))
+        self.assertEqual(lua.globals().stateFiles[base],before)
+        self.assertIsNotNone(lua.globals().dbSlots[1])
+
+    def test_reset_refuses_database_descriptor_replaced_externally(self):
+        _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
+        lua.execute("dbSlots[1]={name='unrelated-replacement',size=1}")
+        self.assertIn('slot changed externally',self.invoke_auto(lua))
+        self.assertEqual(lua.globals().dbSlots[1].name,'unrelated-replacement')
+
+    def test_interrupted_reset_blocks_resume_and_never_clears_a_reused_slot(self):
+        _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
+        lua.execute("""
+          local original=devices.db.clear
+          devices.db.clear=function(slot) original(slot); error('crash after clear') end
+        """)
+        self.assertIn('crash after clear',self.invoke_auto(lua))
+        self.assertIn('Reset cleanup is pending',self.invoke_auto(lua,action='resume'))
+        lua.execute("dbSlots[1]=beeStack('a','drone',1); devices.db.clear=function(slot) dbSlots[slot]=nil end")
+        self.assertIn('interrupted database clear is ambiguous',self.invoke_auto(lua))
+        self.assertIsNotNone(lua.globals().dbSlots[1])
+        lua.execute('dbSlots[1]=nil')
+        self.assertIn('AUTO RESET complete',self.invoke_auto(lua))
+        self.assertIsNone(lua.globals().stateFiles['/home/.openbeekeeper-data/automation-reset-2.index'])
+
     def test_embedded_runtime_matches_maintained_source(self):
         from tools.embed_automation import build_body
         maintained=build_body()
