@@ -260,7 +260,7 @@ local function automate()
   local prepare=#groups.analyzer>0 and #groups.imprinter>0
   capabilities.multiply=prepare and zones.breeding>0
   capabilities.restore=capabilities.multiply
-  capabilities.mutate=prepare and options.mutations and #groups.mutatron>0 and hasIncubation
+  capabilities.mutate=#groups.analyzer>0 and options.mutations and #groups.mutatron>0 and hasIncubation
   capabilities.sample=prepare and options.sampling and #groups.sampler>0
   print('MODULES apiaries='..#groups.apiary..' breeding='..zones.breeding..' incubator='..zones.incubator..' unassigned='..zones.unassigned..'; analyzers='..#groups.analyzer..' imprinters='..#groups.imprinter..' mutatrons='..#groups.mutatron..' samplers='..#groups.sampler..' databases='..#tools.databases)
   print('ENABLED breeding='..tostring(capabilities.multiply)..' mutations='..tostring(capabilities.mutate)..' sampling='..tostring(capabilities.sample)..'; analyzer batch='..options.batch)
@@ -630,6 +630,15 @@ local function automate()
     if f.pendingD then f.d=reference(f.pendingD); f.pendingD=nil; save() end
     local step=f.steps[f.step]
     if not step then finishFlow(); return end
+    -- Existing mutation queues may still contain imprint steps. Skip only work
+    -- that has not been sent; finish an already armed/internal imprint safely.
+    if f.mode=='mutate' and step:match('^imprint') then
+      local started=f.op and (f.op.phase~='feeding' or f.op.capture or f.op.handed)
+      if f.op then
+        for _,feed in ipairs(f.op.feeds) do if feed.armed or feed.loaded then started=true end end
+      end
+      if not started then f.op=nil; f.step=f.step+1; save(); return end
+    end
     local selected=(step=='queen' or step:sub(-1)=='P') and f.p or f.d
     if step~='mate' and not materialize(selected) then
       if not f.op then
@@ -857,7 +866,8 @@ local function automate()
   end
   local function start(mode,target,p,d,conditions)
     local f={mode=mode,target=target,step=1,steps=mode=='sample' and {'analyzeD','imprintD','sample'}
-      or mode=='queen' and {'analyzeP','queen'} or {'analyzeP','imprintP','analyzeD','imprintD','mate'}}
+      or mode=='queen' and {'analyzeP','queen'}
+      or mode=='mutate' and {'analyzeP','analyzeD','mate'} or {'analyzeP','imprintP','analyzeD','imprintD','mate'}}
     f.pendingP=p; f.pendingD=d; f.conditions=conditions; st.seq=st.seq+1; st.flows[tostring(st.seq)]=f; st.wait=nil; save(); print("FLOW",mode,target)
   end
   local function choose(stock,samples,category)
@@ -1014,7 +1024,7 @@ local function automate()
     end
     for key in pairs(st.apiaries) do assert(machines[key],'Owned apiary is missing') end
     save()
-    print('AUTO: analyzer -> imprinter -> apiary/mutatron; reserve 32; species gene chance 7.7%; all recipes allowed; server requirements remain enforced.')
+    print('AUTO: breeding analyzer -> imprinter -> apiary; mutation analyzer -> mutatron; reserve 16; species gene chance 7.7%; all recipes allowed; server requirements remain enforced.')
     print('Ctrl+C pauses. bees auto resumes. Fluids/power must be supplied to the machines.')
     local capacity=0
     for _,e in ipairs(tools.databases) do

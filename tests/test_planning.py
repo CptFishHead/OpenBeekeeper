@@ -23,9 +23,9 @@ class PlanningTests(unittest.TestCase):
     def plan(self, code=''):
         return runtime.RuntimeTests().run_script(SETUP+code, 'plan')
 
-    def test_surplus_drones_leave_thirty_two_reserved(self):
+    def test_surplus_drones_leave_sixteen_reserved(self):
         text, _, lua=self.plan("network('me',{stack('a','A','drone',64)})")
-        self.assertIn('A P=0 D=64 Q=0 | SAMPLE CANDIDATE: 32 surplus', text)
+        self.assertIn('A P=0 D=64 Q=0 | SAMPLE CANDIDATE: 48 surplus', text)
         self.assertEqual(len(list(lua.globals().networkCalls.values())), 1)
         self.assertIn('No items moved', text)
 
@@ -35,24 +35,24 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('sample candidates: 0', text)
 
     def test_exact_target_is_not_sampler_surplus(self):
-        text, _, _=self.plan("network('me',{stack('a','A','drone',32)})")
-        self.assertIn('stock target reached; need surplus donors; reserve=32', text)
+        text, _, _=self.plan("network('me',{stack('a','A','drone',16)})")
+        self.assertIn('stock target reached; need surplus donors; reserve=16', text)
         self.assertIn('sample candidates: 0', text)
 
-    def test_thirty_three_drones_allow_one_donor(self):
-        text, _, _=self.plan("network('me',{stack('a','A','drone',33)})")
-        self.assertIn('SAMPLE CANDIDATE: 1 surplus drones; reserve=32', text)
+    def test_seventeen_drones_allow_one_donor(self):
+        text, _, _=self.plan("network('me',{stack('a','A','drone',17)})")
+        self.assertIn('SAMPLE CANDIDATE: 1 surplus drones; reserve=16', text)
 
     def test_sample_owned_still_replenishes_low_drone_stock(self):
         for sample_expr in ("sample('a',0)", "{name='gendustry:gene_sample',label='Bee Sample - Species: A',size=1}"):
             with self.subTest(sample=sample_expr):
-                text, _, _=self.plan("network('me',{"+sample_expr+",stack('a','A','drone',31),stack('a','A','princess',1)})")
-                self.assertIn('REPRODUCE: build stock to 32; deficit=1', text)
+                text, _, _=self.plan("network('me',{"+sample_expr+",stack('a','A','drone',15),stack('a','A','princess',1)})")
+                self.assertIn('REPRODUCE: build stock to 16; deficit=1', text)
                 self.assertIn('sample candidates: 0', text)
 
     def test_mutation_marks_consumption_of_target_reserve(self):
-        text, _, _=self.plan("catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',32)})")
-        self.assertIn('would draw from drone reserve=32', text)
+        text, _, _=self.plan("catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',16)})")
+        self.assertIn('would draw from drone reserve=16', text)
 
     def test_pair_and_queen_are_separate_reproduction_actions(self):
         text, _, _=self.plan("network('me',{stack('a','A','princess',1),stack('a','A','drone',1),stack('b','B','queen',1)})")
@@ -76,14 +76,14 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(lua.globals().catalogueReads, 1)
 
     def test_conditional_recipe_is_included_with_explicit_conditions(self):
-        text, _, _=self.plan("conditional=true; catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',33)})")
+        text, _, _=self.plan("conditional=true; catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',17)})")
         self.assertIn('-> C', text)
         self.assertIn('CONDITIONS: During the night.', text)
 
     def test_sampled_extinct_species_is_a_mutation_recovery_candidate(self):
         for gene_sample in ("sample('c',0)", "{name='gendustry:gene_sample',label='Bee Sample - Species: C',size=1}"):
             with self.subTest(sample=gene_sample):
-                text, _, _ = self.plan("catalogue('h'); network('me',{"+gene_sample+",stack('a','A','princess',2),stack('b','B','drone',33)})")
+                text, _, _ = self.plan("catalogue('h'); network('me',{"+gene_sample+",stack('a','A','princess',2),stack('b','B','drone',17)})")
                 self.assertIn('A (P) + B (D) -> C', text)
                 self.assertIn('RECOVER: species sample present, no living bees', text)
 
