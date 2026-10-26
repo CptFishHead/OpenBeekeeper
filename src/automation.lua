@@ -350,7 +350,8 @@ local function automate()
         end
       end
     end
-    error("No free OC database entry")
+    warn("Waiting for a free OC database entry; existing jobs continue")
+    return nil
   end
   local function release(id)
     if not id or not st.refs[id] then return end
@@ -448,7 +449,7 @@ local function automate()
     return moved>0
   end
   local function reference(v)
-    local id=allocate(); local r=st.refs[id]
+    local id=allocate(); if not id then return nil end; local r=st.refs[id]
     r.filter={name=v.name,label=v.label}; r.uid,r.kind=bee(v); r.name=v.name; r.label=v.label; r.available=v.size
     save(); return id
   end
@@ -491,7 +492,7 @@ local function automate()
     if alive(item(m,slot)) and not job then return true end
     if not job then
       if resourceRetry[key] and computer.uptime()<resourceRetry[key] then return false end
-      local id=allocate(); local r=st.refs[id]
+      local id=allocate(); if not id then return false end; local r=st.refs[id]
       st.resources[key]={ref=id,intention={}}; save(); job=st.resources[key]
       call(me.proxy.store,{label=label},r.database,r.slot,1)
       local v=call(db(r).get,r.slot)
@@ -682,8 +683,14 @@ local function automate()
       f.reselect=nil; save()
     end
     if deliveryRetry[currentID] and computer.uptime()<deliveryRetry[currentID] then return end
-    if f.pendingP then f.p=reference(f.pendingP); f.pendingP=nil; save() end
-    if f.pendingD then f.d=reference(f.pendingD); f.pendingD=nil; save() end
+    if f.pendingP then
+      local id=reference(f.pendingP); if not id then return end
+      f.p=id; f.pendingP=nil; save()
+    end
+    if f.pendingD then
+      local id=reference(f.pendingD); if not id then return end
+      f.d=id; f.pendingD=nil; save()
+    end
     local step=f.steps[f.step]
     if not step then finishFlow(); return end
     -- Existing mutation queues may still contain imprint steps. Skip only work
@@ -1135,20 +1142,21 @@ local function automate()
     print('AUTO: breeding analyzer -> imprinter -> apiary; mutation parents -> mutatron; queens -> climate apiary; reserve 16; species gene chance 7.7%; all recipes allowed; server requirements remain enforced.')
     print('Ctrl+C pauses. bees auto resumes. Fluids/power must be supplied to the machines.')
     local capacity=0
+    local owned={}
+    for _,r in pairs(st.refs) do owned[r.database..':'..r.slot]=true end
     for _,e in ipairs(tools.databases) do
       for slot=1,81 do
         local v,err=read(e.proxy.get,slot); if err then break end
-        if v==nil then capacity=capacity+1 end
+        if v==nil or owned[e.address..':'..slot] then capacity=capacity+1 end
       end
     end
-    for _ in pairs(st.refs) do capacity=capacity+1 end
     local supplySlots=#groups.imprinter+2*#groups.sampler+#groups.mutatron
     local flowLimit=math.max(0,math.min(options.queue>0 and options.queue or (#groups.apiary+#groups.mutatron+#groups.sampler),math.floor((capacity-supplySlots)/2)))
     print('Preparation capacity:',flowLimit,'flows; analyzer input slots: 6 per machine')
     local nextRead=0; local lastSummary=-60
     local schedule={'queen','mutate','breed','breed','sample'}
     local cursor=0
-    assert(flowLimit>0,'No usable job capacity; check modules and free OC database entries')
+    assert(flowLimit>0 or next(st.flows),'No usable job capacity; check modules and free OC database entries')
     for _,f in pairs(st.flows) do if f.op then assert(machines[f.op.key],'Saved processor is missing; resolve existing work before changing modules') end end
     while true do
       if dashboard then

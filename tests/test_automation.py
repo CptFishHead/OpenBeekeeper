@@ -214,6 +214,35 @@ class AutomationTests(unittest.TestCase):
     def execute(self, setup='', *args):
         return runtime.RuntimeTests().run_script(FULL+setup, 'auto', *args)
 
+    def test_resume_counts_empty_owned_database_slots_only_once(self):
+        _, _, lua=self.execute(r'''
+          for slot=8,81 do dbSlots[slot]={name='unrelated',size=1} end
+          add('a','princess',1); add('a','drone',15); stock.ga=sample('a')
+          stallProcessor='analyzer'; interruptAt=3
+        ''')
+        lua.execute('interruptAt=clock+3')
+        text=self.invoke_auto(lua,action='resume')
+        self.assertIn('Preparation capacity: 1 flows',text)
+        self.assertNotIn('Preparation capacity: 2 flows',text)
+
+    def test_database_exhaustion_waits_without_losing_pending_bee(self):
+        text, _, lua=self.execute(r'''
+          add('a','drone',17); interruptAt=40
+          local get=devices.db.get
+          devices.db.get=function(slot)
+            local v=get(slot)
+            if blockFree and clock<5 and not v then return {name='external',size=1} end
+            return v
+          end
+          local query=devices.me.getItemsInNetwork
+          devices.me.getItemsInNetwork=function(...)
+            blockFree=true; return query(...)
+          end
+        ''')
+        self.assertIn('Waiting for a free OC database entry',text)
+        self.assertNotIn('No free OC database entry',text)
+        self.assertEqual(list(lua.globals().sampled.values()),['a'])
+
     def test_prepares_both_parents_in_order_before_mating_and_bulk_returns(self):
         text, _, lua=self.execute("add('a','princess',1); add('a','drone',15); stock.gene=sample('a'); interruptAt=45; callableMode=true")
         self.assertNotIn('UNPREPARED', text)
