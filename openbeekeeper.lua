@@ -342,14 +342,20 @@ local function bindModules(recover)
   assert(not fs.exists(BIND_PENDING),"Unfinished binding. Run bees bind-reset first")
   assert(not fs.exists(pendingPath),"Finish bees interface-reset first")
   assert(#modules>0,"No processing module with an adjacent ME interface found")
-  assert(#modules==#interfaces,"Need one configurable interface per module: modules="..#modules..", interfaces="..#interfaces)
+  assert(#interfaces>=#modules,"Need one configurable interface per module: modules="..#modules..", interfaces="..#interfaces)
   assert(#tools.databases>0,"One OC database is required")
   -- Never overwrite requests or draw conclusions from an already occupied buffer.
+  local candidates={}
   for _,entry in ipairs(interfaces) do
+    local empty=true
     for slot=1,9 do
-      assert(call(entry.proxy.getInterfaceConfiguration,slot)==nil,"Interface has existing requests: "..entry.address)
+      if call(entry.proxy.getInterfaceConfiguration,slot)~=nil then empty=false end
     end
+    if empty then candidates[#candidates+1]=entry
+    else print("SKIP existing requests: "..entry.address) end
   end
+  assert(#candidates>=#modules,"Not enough interfaces without existing requests: modules="..#modules..", candidates="..#candidates)
+  print("Binding "..#modules.." modules using "..#candidates.." empty-configuration candidates")
   for _,module in ipairs(modules) do
     for slot=1,9 do
       assert(not alive(call(module.entry.proxy.getStackInSlot,module.side,slot)),"Interface inventory must be empty: "..module.entry.address)
@@ -370,8 +376,9 @@ local function bindModules(recover)
   end
   local rows={"OpenBeekeeper-modules-1"}
   local used={}
+  local bound=0
   local ok,err=pcall(function()
-    for index,interface in ipairs(interfaces) do
+    for index,interface in ipairs(candidates) do
       -- Write ownership before any mutating call so interruption is recoverable.
       writeText(BIND_PENDING,"OBBIND1\n"..interface.address.." "..db.address.." "..dbSlot.."\n")
       if index==1 then
@@ -401,20 +408,26 @@ local function bindModules(recover)
         if found then break end
         if attempt<15 then os.sleep(1) end
       end
-      assert(found,"No marker delivered within 15 seconds")
-      assert(not used[found.entry.address],"Several interface components map to one module")
-      used[found.entry.address]=true
       call(interface.proxy.setInterfaceConfiguration,9)
       assert(call(interface.proxy.getInterfaceConfiguration,9)==nil,"Cannot clear marker request")
-      waitEmpty(found)
-      rows[#rows+1]="interface "..found.entry.address.." "..found.side.." "..interface.address
-      for _,machine in ipairs(found.machines) do
-        rows[#rows+1]="machine "..found.entry.address.." "..machine.side.." "..machine.name
+      if found then
+        assert(not used[found.entry.address],"Several interface components map to one module")
+        used[found.entry.address]=true
+        waitEmpty(found)
+        bound=bound+1
+        rows[#rows+1]="interface "..found.entry.address.." "..found.side.." "..interface.address
+        for _,machine in ipairs(found.machines) do
+          rows[#rows+1]="machine "..found.entry.address.." "..machine.side.." "..machine.name
+        end
+        print("BOUND "..bound.."/"..#modules..": "..found.entry.address.." -> "..interface.address.."; machines="..#found.machines)
+      else
+        print("SKIP no marker delivered within 15 seconds: "..interface.address)
       end
-      print("BOUND "..index.."/"..#interfaces..": "..found.entry.address.." -> "..interface.address.."; machines="..#found.machines)
+      if bound==#modules then break end
       -- Retain journal ownership of the descriptor across modules and crashes.
     end
     cleanup()
+    assert(bound==#modules,"Incomplete binding: bound="..bound..", modules="..#modules..". No marker delivered within 15 seconds for remaining modules; previous map preserved")
     writeText(BIND_PATH..".new",table.concat(rows,"\n").."\n")
     if fs.exists(BIND_PATH..".bak") then assert(fs.remove(BIND_PATH..".bak")) end
     if fs.exists(BIND_PATH) then assert(fs.rename(BIND_PATH,BIND_PATH..".bak")) end
@@ -425,7 +438,7 @@ local function bindModules(recover)
     if not cleaned then print("Cleanup pending: "..tostring(cleanupError)) end
     error(tostring(err))
   end
-  print("Saved "..#interfaces.." module bindings. No bees moved; machine slots untouched.")
+  print("Saved "..bound.." module bindings. No bees moved; machine slots untouched.")
 end
 
 local function collectionPlan()

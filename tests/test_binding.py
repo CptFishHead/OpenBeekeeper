@@ -4,11 +4,11 @@ import test_runtime as runtime
 
 FIXTURE = r'''
 buffers={}; configs={}; databaseSlots={}; stores=0; requests=0; machineMoves=0
-routes={8,3,6,1,7,2,5,4}; delayed=false
+routes={8,3,6,1,7,2,5,4}; delayed=false; moduleCount=8
 local marker={name='minecraft:cobblestone',size=1}
 devices.db={kind='database',get=function(slot) return databaseSlots[slot] end,
   clear=function(slot) databaseSlots[slot]=nil end}
-for i=1,8 do
+for i=1,moduleCount do
   local n=i; buffers[n]={}; configs[n]={}
   devices['t'..n]={kind='transposer',
     getInventoryName=function(side)
@@ -62,6 +62,39 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(lua.globals().machineMoves, 0)
         self.assertEqual(len(list(lua.globals().databaseSlots.items())), 0)
         self.assertIsNone(lua.globals().stateFiles['/home/.openbeekeeper-data/bind-pending'])
+
+    def test_nine_modules_thirteen_interfaces_skip_foreign_and_busy(self):
+        fixture = FIXTURE.replace('moduleCount=8', 'moduleCount=13')
+        setup = r'''
+          -- Nine working modules, four unrelated interfaces; UUID order is scrambled.
+          routes={8,3,6,1,7,2,5,4,9,10,11,12,13}
+          for i=10,13 do devices['t'..i]=nil end
+          configs[11][2]={name='minecraft:diamond',size=1}
+          devices['if0']=devices.if10; devices.if10=nil
+          devices['ifz']=devices.if13; devices.if13=nil
+          stateFiles['/home/.openbeekeeper-data/modules']='OLD'
+        '''
+        text, _, lua=runtime.RuntimeTests().run_script(fixture+setup, 'bind')
+        self.assertIn('Saved 9 module bindings', text)
+        self.assertIn('SKIP no marker delivered', text)
+        self.assertIn('SKIP existing requests', text)
+        self.assertEqual(lua.globals().requests, 11)  # two foreign probes before completion
+        self.assertEqual(lua.globals().stores, 1)
+        self.assertIsNotNone(lua.globals().configs[11][2])
+        self.assertIsNone(lua.globals().configs[13][9])  # trailing candidate never probed
+        data=lua.globals().stateFiles['/home/.openbeekeeper-data/modules']
+        self.assertEqual(data.count('interface '), 9)
+        self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/modules.bak'], 'OLD')
+
+    def test_missing_route_preserves_previous_map_and_cleans_all_probes(self):
+        text, _, lua=self.run_binding("routes[8]=9; buffers[9]={}; stateFiles['/home/.openbeekeeper-data/modules']='OLD'")
+        self.assertIn('Incomplete binding: bound=7, modules=8', text)
+        self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/modules'], 'OLD')
+        self.assertIsNone(lua.globals().stateFiles['/home/.openbeekeeper-data/modules.bak'])
+        self.assertIsNone(lua.globals().stateFiles['/home/.openbeekeeper-data/bind-pending'])
+        self.assertEqual(len(list(lua.globals().databaseSlots.items())), 0)
+        for i in range(1,9):
+            self.assertIsNone(lua.globals().configs[i][9])
 
     def test_existing_database_descriptors_are_preserved(self):
         text, _, lua=self.run_binding("databaseSlots[1]=drone('keep.original')")
