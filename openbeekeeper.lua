@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.11.4: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.11.5: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -830,10 +830,19 @@ local function climateCommand()
   local changed=false
   if action=='breeding' then
     assert(args[3]=='native','Use bees zones breeding native to explicitly select non-emulated apiaries')
+    local t,h
+    if args[4] or args[5] then
+      t,h=tostring(args[4]):upper(),tostring(args[5]):upper()
+      assert(temperatures[t] and humidities[h],'Use bees zones breeding native <TEMP> <HUMIDITY>')
+    end
     local count=0
     for _,m in ipairs(rows) do
       local z=climateOfApiary(m.module.t,m.side)
-      if z.profile=='native' and not z.unknown then config.roles[m.key]='breeding'; count=count+1 end
+      if z.profile=='native' and not z.unknown then
+        config.roles[m.key]='breeding'
+        if t then config.manual[m.key]={temperature=t,humidity=h,signature=z.signature} end
+        count=count+1
+      end
     end
     print('Explicitly assigned breeding apiaries:',count); changed=true
   elseif action=='role' or action=='climate' or action=='clear' then
@@ -845,7 +854,7 @@ local function climateCommand()
       local t,h=tostring(args[4]):upper(),tostring(args[5]):upper()
       assert(temperatures[t] and humidities[h],'Use ICY/COLD/NORMAL/WARM/HOT/HELLISH and ARID/NORMAL/DAMP')
       config.manual[m.key]={temperature=t,humidity=h,signature=climateOfApiary(m.module.t,m.side).signature}
-      config.roles[m.key]='incubator'
+      config.roles[m.key]=config.roles[m.key] or 'incubator'
     else config.manual[m.key]=nil; config.roles[m.key]=nil end
     changed=true
   elseif action=='species' then
@@ -868,7 +877,7 @@ local function climateCommand()
     print(i,z.role,z.profile,z.temperature or '?',z.humidity or '?',m.key)
   end
   print('Emulator climate is computed from installed client rules; altitude/server changes may require a GUI-confirmed override.')
-  print('No bee or upgrade moved. Breeding and incubation roles are separate.')
+  print('No bee or upgrade moved. Breeding apiaries also accept queens when their configured climate matches.')
 end
 -- Embedded in openbeekeeper.lua by tools/embed_automation.py; no runtime module dependency.
 local function automate()
@@ -1127,11 +1136,12 @@ local function automate()
     local zone=climateZone(m,configuration)
     zones[zone.role]=(zones[zone.role] or 0)+1
   end
-  local capabilities={queen=#groups.analyzer>0 and zones.incubator>0}
+  local hasIncubation=zones.incubator+zones.breeding>0
+  local capabilities={queen=#groups.analyzer>0 and hasIncubation}
   local prepare=#groups.analyzer>0 and #groups.imprinter>0
   capabilities.multiply=prepare and zones.breeding>0
   capabilities.restore=capabilities.multiply
-  capabilities.mutate=prepare and options.mutations and #groups.mutatron>0 and zones.incubator>0
+  capabilities.mutate=prepare and options.mutations and #groups.mutatron>0 and hasIncubation
   capabilities.sample=prepare and options.sampling and #groups.sampler>0
   print('MODULES apiaries='..#groups.apiary..' breeding='..zones.breeding..' incubator='..zones.incubator..' unassigned='..zones.unassigned..'; analyzers='..#groups.analyzer..' imprinters='..#groups.imprinter..' mutatrons='..#groups.mutatron..' samplers='..#groups.sampler..' databases='..#tools.databases)
   print('ENABLED breeding='..tostring(capabilities.multiply)..' mutations='..tostring(capabilities.mutate)..' sampling='..tostring(capabilities.sample)..'; analyzer batch='..options.batch)
@@ -1389,7 +1399,9 @@ local function automate()
         local epoch=math.floor(computer.uptime()/5)
         if not cache or cache.epoch~=epoch then cache={epoch=epoch,value=climateOfApiary(m.module.t,m.side)}; zoneCache[m.key]=cache end
         local zone=climateZone(m,configuration,cache.value)
-        roleMatches=zone.role==purpose and (purpose=='breeding' or (zone.temperature==requiredT and zone.humidity==requiredH))
+        roleMatches=purpose=='breeding' and zone.role=='breeding'
+          or purpose=='incubator' and (zone.role=='incubator' or zone.role=='breeding')
+            and zone.temperature==requiredT and zone.humidity==requiredH
       end
       if kind=='analyzer' and emptyBuffer(m.module) then
         local owned,duplicate,reserved=false,false,{}

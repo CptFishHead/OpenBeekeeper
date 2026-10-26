@@ -477,6 +477,33 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual({v.module for v in jobs},{1,2,3,4})
         self.assertTrue(any(v.kind=='analyzer' and v.count>1 for v in lua.globals().visits.values()))
 
+    def test_native_breeding_apiaries_also_incubate_matching_queens(self):
+        setup=r'''
+          local p='/home/.openbeekeeper-data/modules'; local rows={}
+          for line in stateFiles[p]:gmatch('[^\n]+') do
+            if not line:match('^interface t9 ') and not line:match('^machine t9 ') then rows[#rows+1]=line end
+          end
+          stateFiles[p]=table.concat(rows,'\n')..'\n'
+          local c=require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/climate'])
+          c.species.b={'HOT','ARID'}
+          stateFiles['/home/.openbeekeeper-data/climate']=require('serialization').serialize(c)
+          add('a','queen',1); add('b','queen',1); stock.ga=sample('a'); stock.gb=sample('b')
+          stall=true; interruptAt=20
+        '''
+        _, _, lua=self.execute(setup,'check')
+        lua.eval('function(src) return assert(load(src))("zones","breeding","native","NORMAL","NORMAL") end')(runtime.SOURCE)
+        # Updating climate must not silently turn a breeding apiary into an incubator.
+        lua.eval('function(src) return assert(load(src))("zones","climate","1","NORMAL","NORMAL") end')(runtime.SOURCE)
+        c=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/climate'])")
+        self.assertTrue(all(role=='breeding' for role in c.roles.values()))
+        text=self.invoke_auto(lua,action='resume')
+        self.assertIn('mutations=true',text)
+        loads=[v for v in lua.globals().loaded.values() if v.slot==1]
+        self.assertEqual(len(loads),1)
+        self.assertEqual(loads[0].uid,'a')
+        self.assertIn(loads[0].module,{1,2,3,4})
+        self.assertIn('HOT/ARID',text)
+
     def test_optional_modules_and_preflight_configuration(self):
         setup=r'''
           local p='/home/.openbeekeeper-data/modules'

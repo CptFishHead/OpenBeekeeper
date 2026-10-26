@@ -74,10 +74,19 @@ local function climateCommand()
   local changed=false
   if action=='breeding' then
     assert(args[3]=='native','Use bees zones breeding native to explicitly select non-emulated apiaries')
+    local t,h
+    if args[4] or args[5] then
+      t,h=tostring(args[4]):upper(),tostring(args[5]):upper()
+      assert(temperatures[t] and humidities[h],'Use bees zones breeding native <TEMP> <HUMIDITY>')
+    end
     local count=0
     for _,m in ipairs(rows) do
       local z=climateOfApiary(m.module.t,m.side)
-      if z.profile=='native' and not z.unknown then config.roles[m.key]='breeding'; count=count+1 end
+      if z.profile=='native' and not z.unknown then
+        config.roles[m.key]='breeding'
+        if t then config.manual[m.key]={temperature=t,humidity=h,signature=z.signature} end
+        count=count+1
+      end
     end
     print('Explicitly assigned breeding apiaries:',count); changed=true
   elseif action=='role' or action=='climate' or action=='clear' then
@@ -89,7 +98,7 @@ local function climateCommand()
       local t,h=tostring(args[4]):upper(),tostring(args[5]):upper()
       assert(temperatures[t] and humidities[h],'Use ICY/COLD/NORMAL/WARM/HOT/HELLISH and ARID/NORMAL/DAMP')
       config.manual[m.key]={temperature=t,humidity=h,signature=climateOfApiary(m.module.t,m.side).signature}
-      config.roles[m.key]='incubator'
+      config.roles[m.key]=config.roles[m.key] or 'incubator'
     else config.manual[m.key]=nil; config.roles[m.key]=nil end
     changed=true
   elseif action=='species' then
@@ -112,5 +121,5 @@ local function climateCommand()
     print(i,z.role,z.profile,z.temperature or '?',z.humidity or '?',m.key)
   end
   print('Emulator climate is computed from installed client rules; altitude/server changes may require a GUI-confirmed override.')
-  print('No bee or upgrade moved. Breeding and incubation roles are separate.')
+  print('No bee or upgrade moved. Breeding apiaries also accept queens when their configured climate matches.')
 end
