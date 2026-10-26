@@ -540,8 +540,7 @@ local function collectionPlan()
   for _,recipe in pairs(recipes) do
     if type(recipe)=="table" then
       local a,b,result=resolve(recipe.allele1),resolve(recipe.allele2),resolve(recipe.result)
-      if a and b and result and result.princess+result.drone+result.queen==0
-          and result.samples==0 and not result.labelSample then
+      if a and b and result and result.princess+result.drone+result.queen==0 then
         local p,d
         if a.princess>0 and b.drone>0 then p,d=a,b
         elseif b.princess>0 and a.drone>0 then p,d=b,a end
@@ -560,6 +559,7 @@ local function collectionPlan()
             if d.drone<=DRONE_TARGET then reserve=reserve.." | REVIEW: would draw from drone reserve="..DRONE_TARGET end
             candidateRows[#candidateRows+1]=p.label.." (P) + "..d.label.." (D) -> "..result.label
               .." | "..tostring(recipe.chance or "?").."%"..reserve
+              ..((result.samples>0 or result.labelSample) and " | RECOVER: species sample present, no living bees" or "")
               ..(#conditions>0 and " | CONDITIONS: "..table.concat(conditions,"; ") or "")
           end
         end
@@ -568,7 +568,7 @@ local function collectionPlan()
   end
   table.sort(candidateRows)
   for _,row in ipairs(candidateRows) do print(row) end
-  if #candidateRows==0 then print("No available pair for an unobserved result in the current catalogue.") end
+  if #candidateRows==0 then print("No available pair for a species without living bees in the current catalogue.") end
   print("Mutatron result selection is not exposed by the installed OC driver.")
   print("Plan only: no donors consumed, no requests configured, no jobs started.")
   if unverified>0 then print("Sample items without structured gene identity: "..unverified..". Label evidence requires review.") end
@@ -1335,6 +1335,7 @@ local function automate()
     f.pendingP=p; f.pendingD=d; f.conditions=conditions; st.seq=st.seq+1; st.flows[tostring(st.seq)]=f; st.wait=nil; save(); print("FLOW",mode,target)
   end
   local function choose(stock,samples)
+    local observed=stock
     local incoming,predicted,load={},{},{}
     for _,j in pairs(st.apiaries) do
       if not j.orphan then
@@ -1398,7 +1399,12 @@ local function automate()
     for _,recipe in pairs(recipes) do
       if type(recipe)=='table' then
         local a,b,result=resolve(recipe.allele1),resolve(recipe.allele2),resolve(recipe.result)
-        if a and b and result and not incoming[result] and not samples[result] and (not stock[result] or stock[result].princess==0) then
+        local existing=result and stock[result]
+        -- A collected gene does not replace the living stock target. Recreate
+        -- extinct lines, but let existing bees and in-flight jobs restore them.
+        local living=result and observed[result]
+        local extinct=not living or living.princess+living.drone+living.queen==0
+        if a and b and result and not incoming[result] and (not samples[result] or extinct) and (not existing or existing.princess==0) then
           local function pair(p,d)
             if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and (p.drone>0 or p.princess>1) then
               local conditions={}

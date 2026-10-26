@@ -80,6 +80,13 @@ class PlanningTests(unittest.TestCase):
         self.assertIn('-> C', text)
         self.assertIn('CONDITIONS: During the night.', text)
 
+    def test_sampled_extinct_species_is_a_mutation_recovery_candidate(self):
+        for gene_sample in ("sample('c',0)", "{name='gendustry:gene_sample',label='Bee Sample - Species: C',size=1}"):
+            with self.subTest(sample=gene_sample):
+                text, _, _ = self.plan("catalogue('h'); network('me',{"+gene_sample+",stack('a','A','princess',2),stack('b','B','drone',33)})")
+                self.assertIn('A (P) + B (D) -> C', text)
+                self.assertIn('RECOVER: species sample present, no living bees', text)
+
     def test_observed_result_not_presented_as_new_species(self):
         text, _, _=self.plan("catalogue('h'); network('me',{stack('a','A','princess',2),stack('b','B','drone',2),stack('c','C','drone',1)})")
         self.assertNotIn('-> C', text)

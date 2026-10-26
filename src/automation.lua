@@ -463,6 +463,7 @@ local function automate()
     f.pendingP=p; f.pendingD=d; f.conditions=conditions; st.seq=st.seq+1; st.flows[tostring(st.seq)]=f; st.wait=nil; save(); print("FLOW",mode,target)
   end
   local function choose(stock,samples)
+    local observed=stock
     local incoming,predicted,load={},{},{}
     for _,j in pairs(st.apiaries) do
       if not j.orphan then
@@ -526,7 +527,12 @@ local function automate()
     for _,recipe in pairs(recipes) do
       if type(recipe)=='table' then
         local a,b,result=resolve(recipe.allele1),resolve(recipe.allele2),resolve(recipe.result)
-        if a and b and result and not incoming[result] and not samples[result] and (not stock[result] or stock[result].princess==0) then
+        local existing=result and stock[result]
+        -- A collected gene does not replace the living stock target. Recreate
+        -- extinct lines, but let existing bees and in-flight jobs restore them.
+        local living=result and observed[result]
+        local extinct=not living or living.princess+living.drone+living.queen==0
+        if a and b and result and not incoming[result] and (not samples[result] or extinct) and (not existing or existing.princess==0) then
           local function pair(p,d)
             if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and (p.drone>0 or p.princess>1) then
               local conditions={}
