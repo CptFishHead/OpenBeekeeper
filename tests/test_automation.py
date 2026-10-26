@@ -242,6 +242,35 @@ class AutomationTests(unittest.TestCase):
         self.assertGreaterEqual(lua.globals().stock['side:drone'].size, 3)
         self.assertIsNone(lua.globals().stock['goal:drone'])
 
+    def test_sampled_extinct_species_is_recreated_without_resampling(self):
+        for gene_sample in ("sample('goal')", "{name='gendustry:gene_sample',label='Bee Sample - Species: goal',size=1}"):
+            with self.subTest(sample=gene_sample):
+                setup = ("add('a','princess',4); add('a','drone',32); add('b','drone',33); "
+                         "stock.ga=sample('a'); stock.gb=sample('b'); stock.goalGene="+gene_sample+"; "
+                         "mutationResult='goal'; interruptAt=300")
+                text, _, lua = self.execute(setup)
+                self.assertIn('MUTATION RESULT goal wanted goal MATCH', text)
+                self.assertGreaterEqual(lua.globals().stock['goal:drone'].size, 32)
+                self.assertNotIn('goal', list(lua.globals().sampled.values()))
+                self.assertEqual(list(lua.globals().observedMutations.values()), ['goal'])
+
+    def test_sampled_extinct_species_has_only_one_inflight_mutation(self):
+        setup = ("add('a','princess',8); add('a','drone',32); add('b','drone',40); "
+                 "stock.ga=sample('a'); stock.gb=sample('b'); stock.goalGene=sample('goal'); "
+                 "stallProcessor='mutatron'; interruptAt=70")
+        text, _, lua = self.execute(setup)
+        self.assertEqual(text.count('FLOW mutate goal'), 1)
+        self.assertEqual(len([v for v in lua.globals().visits.values() if v.kind=='mutatron']), 2)
+
+    def test_sampled_species_with_living_queen_or_target_stock_is_not_remutated(self):
+        for living in ("add('goal','queen',1); stall=true", "add('goal','drone',32)"):
+            with self.subTest(living=living):
+                setup = ("add('a','princess',4); add('a','drone',32); add('b','drone',33); "
+                         "stock.ga=sample('a'); stock.gb=sample('b'); stock.goalGene=sample('goal'); "+living+"; interruptAt=70")
+                text, _, lua = self.execute(setup)
+                self.assertNotIn('FLOW mutate goal', text)
+                self.assertEqual(list(lua.globals().observedMutations.values()), [])
+
     def test_conditional_recipes_are_dispatched_as_unverified_attempts(self):
         text, _, lua=self.execute("onlyConditional=true; add('a','princess',2); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=30")
         self.assertTrue(list(lua.globals().observedMutations.values()))
