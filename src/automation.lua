@@ -19,11 +19,24 @@ local function automate()
     assert(ok and type(value)=="table" and value.schema==schema,"Invalid "..schema.." journal; preserve it")
     return value
   end
-  local options=readText(optionsPath)
+  local options=readText(optionsPath..'.new') or readText(optionsPath)
   options=options and parse(options,'AUTOOPTIONS1') or {schema='AUTOOPTIONS1',batch=64,queue=0,mutations=true,sampling=true}
   assert(type(options.batch)=='number' and options.batch%1==0 and options.batch>=1 and options.batch<=64
     and type(options.queue)=='number' and options.queue%1==0 and options.queue>=0 and options.queue<=128
     and type(options.mutations)=='boolean' and type(options.sampling)=='boolean','Invalid automation options; preserve configuration')
+  options.conditions=options.conditions or {}
+  assert(type(options.conditions)=='table','Invalid condition policy')
+  for key,value in pairs(options.conditions) do
+    assert(type(key)=='string' and type(value)=='boolean','Invalid condition policy entry')
+  end
+  local function saveOptions()
+    if not fs.exists(dir) then assert(fs.makeDirectory(dir)) end
+    local text=ser.serialize(options)
+    writeText(optionsPath..'.new',text)
+    assert(readText(optionsPath..'.new')==text,'Options verification failed')
+    if fs.exists(optionsPath) then assert(fs.remove(optionsPath)) end
+    assert(fs.rename(optionsPath..'.new',optionsPath))
+  end
   if args[2]=='config' then
     local key,value=args[3],args[4]
     if key then
@@ -33,8 +46,7 @@ local function automate()
         assert(value and value%1==0 and value>=(key=='batch' and 1 or 0) and value<=(key=='batch' and 64 or 128),'Invalid option value')
       else assert(value=='on' or value=='off','Use on/off'); value=value=='on' end
       options[key]=value
-      if not fs.exists(dir) then assert(fs.makeDirectory(dir)) end
-      writeText(optionsPath,ser.serialize(options))
+      saveOptions()
     end
     print('AUTO CONFIG batch='..options.batch..'; queue='..(options.queue==0 and 'auto' or options.queue)..'; mutations='..tostring(options.mutations)..'; sampling='..tostring(options.sampling))
     return true
@@ -303,6 +315,31 @@ local function automate()
     end
   end
   if not next(names) then print('Forestry catalogue unavailable: existing species can breed; new mutation recipes are unavailable.') end
+  local recipeConditionCache={}
+  local function recipeConditions(recipe)
+    if recipeConditionCache[recipe] then return recipeConditionCache[recipe] end
+    local list={}
+    if type(recipe.specialConditions)=='table' then
+      for _,value in pairs(recipe.specialConditions) do list[#list+1]=tostring(value) end
+    elseif hasConditions(recipe) then list[1]=tostring(recipe.specialConditions) end
+    table.sort(list); recipeConditionCache[recipe]=list; return list
+  end
+  local function conditionsAllowed(list)
+    for _,text in ipairs(list or {}) do if options.conditions[text]==false then return false end end
+    return true
+  end
+  local conditionSet={}
+  for _,recipe in pairs(recipes) do
+    if type(recipe)=='table' then for _,text in ipairs(recipeConditions(recipe)) do conditionSet[text]=true end end
+  end
+  for text in pairs(options.conditions) do conditionSet[text]=true end
+  for _,f in pairs(st.flows) do for _,text in ipairs(f.conditions or {}) do conditionSet[text]=true end end
+  local conditionList={}; for text in pairs(conditionSet) do conditionList[#conditionList+1]=text end
+  table.sort(conditionList)
+  if dashboard then
+    dashboard.settings={options=options,conditions=conditionList}
+    dashboard.actions=dashboard.actions or {}
+  end
   local stock,samples={},{}
   local function adjust(v,count)
     local uid,kind=bee(v)
@@ -653,13 +690,18 @@ local function automate()
     for key,job in pairs(st.apiaries) do
       local m=assert(machines[key],"Saved apiary is missing")
       local empty=true
+      if job.cancelRequested then
+        -- The queued next drone belongs to its flow, not to this apiary cycle.
+        if not returnSlot(m,1) then empty=false end
+        if not flowOwns(key) and not returnSlot(m,2) then empty=false end
+      end
       for slot=7,15 do if not returnSlot(m,slot) then empty=false end end
       if not alive(item(m,1)) and not flowOwns(key) then
         local _,kind=bee(item(m,2) or {})
         if kind=='drone' and not returnSlot(m,2) then empty=false end
       end
       if not alive(item(m,1)) and (not alive(item(m,2)) or flowOwns(key)) and empty then
-        st.apiaries[key]=nil; st.cycles=st.cycles+1; save()
+        st.apiaries[key]=nil; if not job.cancelRequested then st.cycles=st.cycles+1 end; save()
         print("APIARY COMPLETE",key,job.uid)
       end
     end
@@ -670,6 +712,48 @@ local function automate()
     st.flows[currentID]=nil; flow=nil; save()
     release(f.p); release(f.d)
   end
+  local function operationStarted(f)
+    if not f.op then return false end
+    if f.op.phase~='feeding' or f.op.capture or f.op.handed then return true end
+    for _,feed in ipairs(f.op.feeds) do if feed.armed or feed.loaded then return true end end
+    return false
+  end
+  local function processControls()
+    local actions=dashboard and dashboard.actions or {}
+    if dashboard then dashboard.actions={} end
+    local changed=false
+    for _,action in ipairs(actions) do
+      if action.kind=='condition' and conditionSet[action.key] then
+        options.conditions[action.key]=options.conditions[action.key]==false
+        saveOptions(); print('CONDITION',options.conditions[action.key] and 'ALLOW' or 'BLOCK',action.key)
+      elseif action.kind=='option' and (action.key=='mutations' or action.key=='sampling') then
+        options[action.key]=not options[action.key]; saveOptions()
+        capabilities.mutate=options.mutations and #groups.mutatron>0 and hasIncubation
+        capabilities.sample=prepare and options.sampling and #groups.sampler>0
+      elseif action.kind=='cancel' then
+        local f=st.flows[action.key]
+        if f then
+          f.cancelRequested=true; save()
+          print('CANCEL REQUESTED',action.key,f.target,'current operation finishes safely; planner unchanged')
+        else print('Task already finished',action.key) end
+      elseif action.kind=='cancelApiary' then
+        local job=st.apiaries[action.key]
+        if job then
+          job.cancelRequested=true
+          save(); print('CANCEL APIARY',action.key,'returning bees to ME; planner unchanged')
+        end
+      end
+    end
+    -- Policy edits also apply to already queued mutations; an internal result
+    -- must still be collected before ownership can be released.
+    for _,f in pairs(st.flows) do
+      if f.mode=='mutate' and (not options.mutations or not conditionsAllowed(f.conditions))
+          or f.mode=='sample' and not options.sampling then
+        if not f.cancelRequested then f.cancelRequested=true; changed=true end
+      end
+    end
+    if changed then save() end
+  end
   local function copyOutput(m,slot,id)
     local r=assert(st.refs[id])
     assert(call(m.module.t.store,m.side,slot,r.database,r.slot),"Cannot copy exact output descriptor")
@@ -678,6 +762,16 @@ local function automate()
   local function serviceFlow()
     if dashboard then dashboard.pump(); assert(not dashboard.stopRequested,'Stopped from dashboard') end
     local f=flow; if not f then return end
+    if f.cancelRequested and not operationStarted(f) then
+      if f.op then
+        for interface,lease in pairs(st.leases) do
+          for _,feed in ipairs(f.op.feeds) do
+            if lease.owner==feed.ref..':'..f.op.key..':'..feed.slot then cleanLease(interface); break end
+          end
+        end
+      end
+      print('CANCELLED',currentID,f.target); finishFlow(); return
+    end
     if f.reselect then
       if st.needFresh then return end
       f.reselect=nil; save()
@@ -819,6 +913,7 @@ local function automate()
     if kind=='apiary' then
       if not op.handed then
         st.apiaries[m.key]={uid=st.refs[f.p].uid,target=f.target,puid=st.refs[f.p].uid,duid=f.d and st.refs[f.d].uid,fertility=st.refs[f.p].fertility}
+        if f.cancelRequested then st.apiaries[m.key].cancelRequested=true end
         op.handed=true; save()
       end
       finishFlow(); return
@@ -920,6 +1015,12 @@ local function automate()
         elseif kind=='analyzer' then r.analyzed=true; save()
         elseif kind=='imprinter' then r.analyzed=true; r.imprinted=true; save() end
       end
+      if f.cancelRequested then
+        if kind=='mutatron' and not capture.failed then st.mutations=st.mutations+1 end
+        if kind=='sampler' then st.samples=st.samples+1 end
+        print('CANCELLED',currentID,f.target,'result returned to ME')
+        finishFlow(); return
+      end
       if capture.failed then
         if not capture.applied then st.losses=(st.losses or 0)+1; capture.applied=true; save() end
         print('GENETIC LOSS',kind,f.target,'waste returned; replanning from actual stock')
@@ -941,7 +1042,32 @@ local function automate()
     end
   end
   local function collectStock(items)
-    local stock,samples={},{}
+    local recipeConditionCache={}
+  local function recipeConditions(recipe)
+    if recipeConditionCache[recipe] then return recipeConditionCache[recipe] end
+    local list={}
+    if type(recipe.specialConditions)=='table' then
+      for _,value in pairs(recipe.specialConditions) do list[#list+1]=tostring(value) end
+    elseif hasConditions(recipe) then list[1]=tostring(recipe.specialConditions) end
+    table.sort(list); recipeConditionCache[recipe]=list; return list
+  end
+  local function conditionsAllowed(list)
+    for _,text in ipairs(list or {}) do if options.conditions[text]==false then return false end end
+    return true
+  end
+  local conditionSet={}
+  for _,recipe in pairs(recipes) do
+    if type(recipe)=='table' then for _,text in ipairs(recipeConditions(recipe)) do conditionSet[text]=true end end
+  end
+  for text in pairs(options.conditions) do conditionSet[text]=true end
+  for _,f in pairs(st.flows) do for _,text in ipairs(f.conditions or {}) do conditionSet[text]=true end end
+  local conditionList={}; for text in pairs(conditionSet) do conditionList[#conditionList+1]=text end
+  table.sort(conditionList)
+  if dashboard then
+    dashboard.settings={options=options,conditions=conditionList}
+    dashboard.actions=dashboard.actions or {}
+  end
+  local stock,samples={},{}
     for _,v in pairs(items) do
       if alive(v) then
         local uid,k=bee(v)
@@ -1045,13 +1171,10 @@ local function automate()
         -- extinct lines, but let existing bees and in-flight jobs restore them.
         local living=result and observed[result]
         local extinct=not living or living.princess+living.drone+living.queen==0
-        if a and b and result and not incoming[result] and (not samples[result] or extinct) and (not existing or existing.princess==0) then
+        if a and b and result and conditionsAllowed(recipeConditions(recipe)) and not incoming[result] and (not samples[result] or extinct) and (not existing or existing.princess==0) then
           local function pair(p,d)
             if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and (p.princess>1 or p.drone>=DRONE_TARGET) then
-              local conditions={}
-              if type(recipe.specialConditions)=='table' then for _,v in pairs(recipe.specialConditions) do conditions[#conditions+1]=tostring(v) end
-              elseif hasConditions(recipe) then conditions[1]=tostring(recipe.specialConditions) end
-              table.sort(conditions)
+              local conditions=recipeConditions(recipe)
               candidates[#candidates+1]={p=p,d=d,result=result,conditions=conditions}
             end
           end
@@ -1139,7 +1262,7 @@ local function automate()
     end
     for key in pairs(st.apiaries) do assert(machines[key],'Owned apiary is missing') end
     save()
-    print('AUTO: breeding analyzer -> imprinter -> apiary; mutation parents -> mutatron; queens -> climate apiary; reserve 16; species gene chance 7.7%; all recipes allowed; server requirements remain enforced.')
+    print('AUTO: breeding analyzer -> imprinter -> apiary; mutation parents -> mutatron; queens -> climate apiary; reserve 16; species gene chance 7.7%; recipe conditions follow Settings; server requirements remain enforced.')
     print('Ctrl+C pauses. bees auto resumes. Fluids/power must be supplied to the machines.')
     local capacity=0
     local owned={}
@@ -1163,6 +1286,7 @@ local function automate()
         dashboard.pollUpdate(); dashboard.render(st)
         assert(not dashboard.stopRequested,'Stopped from dashboard')
       end
+      processControls()
       availability={}
       serviceUnowned()
       serviceApiaries()

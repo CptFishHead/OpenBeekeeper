@@ -214,6 +214,23 @@ class AutomationTests(unittest.TestCase):
     def execute(self, setup='', *args):
         return runtime.RuntimeTests().run_script(FULL+setup, 'auto', *args)
 
+    def test_every_recipe_condition_must_be_enabled(self):
+        for blocked in ['date','biome',None]:
+            with self.subTest(blocked=blocked):
+                setup=r'''
+                  add('a','princess',1); add('a','drone',16); add('b','drone',17)
+                  stock.ga=sample('a'); stock.gb=sample('b'); stallProcessor='mutatron'; interruptAt=12
+                  devices.catalogue.getBeeBreedingData=function() return {{
+                    allele1='a',allele2='b',result='goal',chance=10,
+                    specialConditions={'date','biome'}}} end
+                  local conditions={}
+                '''
+                if blocked:
+                    setup+="conditions['"+blocked+"']=false;"
+                setup+="stateFiles['/home/.openbeekeeper-data/automation-options']=require('serialization').serialize({schema='AUTOOPTIONS1',batch=64,queue=0,mutations=true,sampling=true,conditions=conditions})"
+                text, _, lua=self.execute(setup)
+                self.assertEqual('PROCESS mate' in text,blocked is None)
+
     def test_resume_counts_empty_owned_database_slots_only_once(self):
         _, _, lua=self.execute(r'''
           for slot=8,81 do dbSlots[slot]={name='unrelated',size=1} end

@@ -67,6 +67,110 @@ class DashboardTests(unittest.TestCase):
     def launch(self, setup):
         return runtime.RuntimeTests().run_script(automation.FULL+DISPLAY+setup,'ui')
 
+    def test_settings_condition_checkbox_persists_without_stopping_executor(self):
+        setup=r'''
+          onlyConditional=true; uiAction='stop'; uiAt=8
+          local pull=require('event').pull
+          require('event').pull=function(seconds)
+            local result=pull(seconds)
+            if clock>=1 and not settingsOpened then
+              settingsOpened=true; uiHandlers.touch('touch','screen',46,3)
+            elseif clock>=2 and not conditionClicked then
+              conditionClicked=true; uiHandlers.touch('touch','screen',3,9)
+            end
+            return result
+          end
+        '''
+        _, _, lua=self.launch(setup)
+        options=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation-options'])")
+        self.assertFalse(options.conditions['Night'])
+        self.assertTrue(any('[ ] Night' in row.text for row in lua.globals().uiHistory.values()))
+        self.assertGreaterEqual(lua.globals().clock,8)
+
+    def test_delete_running_mutation_collects_result_and_keeps_planner_running(self):
+        setup=r'''
+          add('a','princess',1); add('a','drone',16); add('b','drone',17)
+          stock.ga=sample('a'); stock.gb=sample('b'); uiAction='stop'; uiAt=12
+          local move=devices.t8.transferItem
+          devices.t8.transferItem=function(from,to,count,slot,destination)
+            if from==0 and slot==3 and not releaseResult then return 0 end
+            return move(from,to,count,slot,destination)
+          end
+          local pull=require('event').pull
+          require('event').pull=function(seconds)
+            local result=pull(seconds)
+            if clock>=2 and not settingsOpened then
+              settingsOpened=true; uiHandlers.touch('touch','screen',46,3)
+            elseif clock>=3 and not tasksOpened then
+              tasksOpened=true; uiHandlers.touch('touch','screen',20,5)
+            elseif clock>=4 and not deleteClicked then
+              deleteClicked=true; uiHandlers.touch('touch','screen',3,6)
+            elseif clock>=5 and not deleteConfirmed then
+              deleteConfirmed=true; uiHandlers.touch('touch','screen',3,9)
+            elseif clock>=6 then releaseResult=true end
+            return result
+          end
+        '''
+        _, _, lua=self.launch(setup)
+        state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertIsNone(state.pausedTargets)
+        self.assertGreaterEqual(state.mutations,1)
+        self.assertTrue(any('CANCELLED' in row.text for row in lua.globals().uiHistory.values()))
+        self.assertTrue(any('result returned to ME' in row.text for row in lua.globals().uiHistory.values()))
+        self.assertGreater(len([v for v in lua.globals().loaded.values() if v.slot==1]),0)
+        self.assertIsNone(lua.globals().processors[8][3])
+
+    def test_delete_unstarted_task_clears_request_and_replans_automatically(self):
+        setup=r'''
+          add('a','drone',17); noSupply=true; uiAction='stop'; uiAt=50
+          local pull=require('event').pull
+          require('event').pull=function(seconds)
+            local result=pull(seconds)
+            if clock>=2 and not clickedTask then
+              clickedTask=true; uiHandlers.touch('touch','screen',3,6)
+            elseif clock>=3 and not confirmed then
+              confirmed=true; uiHandlers.touch('touch','screen',3,9)
+            elseif clock>=6 then noSupply=false
+            end
+            return result
+          end
+        '''
+        _, _, lua=self.launch(setup)
+        state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertIsNone(state.pausedTargets)
+        self.assertEqual(list(lua.globals().sampled.values()),['a'])
+        self.assertTrue(any('CANCELLED' in row.text for row in lua.globals().uiHistory.values()))
+        self.assertEqual(len(list(state.leases.values())),0)
+
+    def test_delete_running_apiary_returns_queen_and_preserves_other_species(self):
+        setup=r'''
+          add('c','queen',1); stock.gc=sample('c'); stall=true; uiAction='stop'; uiAt=10
+          local move=devices.t9.transferItem
+          devices.t9.transferItem=function(from,to,count,slot,destination)
+            if from~=1 and slot==1 then
+              local v=apiaries[9][from][slot]; assert(v and count==v.size)
+              add(v.individual.ident,'queen',count); apiaries[9][from][slot]=nil; return count
+            end
+            return move(from,to,count,slot,destination)
+          end
+          local pull=require('event').pull
+          require('event').pull=function(seconds)
+            local result=pull(seconds)
+            if clock>=3 and not clickedApiary then
+              clickedApiary=true; uiHandlers.touch('touch','screen',3,6)
+            elseif clock>=4 and not confirmed then
+              confirmed=true; uiHandlers.touch('touch','screen',3,9)
+            end
+            return result
+          end
+        '''
+        _, _, lua=self.launch(setup)
+        state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertIsNone(state.pausedTargets)
+        self.assertEqual(state.cycles,0)
+        self.assertGreaterEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),2)
+        self.assertTrue(any('CANCEL APIARY' in row.text for row in lua.globals().uiHistory.values()))
+
     def test_dashboard_theme_tasks_logs_and_stop_preserve_executor_state(self):
         text, _, lua=self.launch("add('a','princess',1); add('a','drone',15); stock.ga=sample('a'); stall=true; uiAction='stop'; uiAt=25")
         frames=[row.text for row in lua.globals().uiHistory.values()]

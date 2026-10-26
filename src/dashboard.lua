@@ -16,7 +16,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.13.2'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.0'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -66,7 +66,8 @@ local function newDashboard()
     local text=ui.input:match('^%s*(.-)%s*$'); ui.input=''
     if text=='' then return end
     ui.log('> '..text)
-    if text=='help' then ui.log('status | check-update | update | exit | any OpenOS command (stops auto first)')
+    if text=='settings' then ui.page='conditions'; ui.taskOffset=0
+    elseif text=='help' then ui.log('settings | status | check-update | update | exit | any OpenOS command (stops auto first)')
     elseif text=='status' then ui.log(ui.summary or 'Starting automation')
     elseif text=='check-update' then ui.checkPending=true
     elseif text=='exit' or text=='stop' then ui.stop()
@@ -120,27 +121,62 @@ local function newDashboard()
     assert(w>=60 and h>=18,'Dashboard resized below 60x18')
     ui.taskEnd=math.min(h-9,math.max(9,math.floor(h*0.45)))
     ui.logStart=ui.taskEnd+2
-    local rows={}; local ids={}
+    local rows,actions={},{}; local ids={}
     for id in pairs(st.flows or {}) do ids[#ids+1]=id end
     table.sort(ids,function(a,b) return (tonumber(a) or 0)<(tonumber(b) or 0) end)
     for _,id in ipairs(ids) do
       local f=st.flows[id]
       rows[#rows+1]='#'..id..' '..f.mode..' '..label(f.target)..' | '..tostring(f.steps[f.step] or 'complete')
-        ..' | '..(f.op and (machine(f.op.key)..' '..f.op.phase) or 'queued')..(f.wait and (' | '..f.wait) or '')
+        ..' | '..(f.op and (machine(f.op.key)..' '..f.op.phase) or 'queued')..(f.cancelRequested and ' | CANCELLING' or '')..(f.wait and (' | '..f.wait) or '')
+      actions[#rows]={kind='cancel',key=id,target=f.target}
     end
     local active=0; local keys={}
     for key in pairs(st.apiaries or {}) do keys[#keys+1]=key end; table.sort(keys)
     for _,key in ipairs(keys) do
-      active=active+1; rows[#rows+1]='Apiary '..machine(key)..' | '..label(st.apiaries[key].uid)..' | running'
+      active=active+1; rows[#rows+1]='Apiary '..machine(key)..' | '..label(st.apiaries[key].uid)..' | '..(st.apiaries[key].cancelRequested and 'CANCELLING' or 'running')
+      actions[#rows]={kind='cancelApiary',key=key,target=st.apiaries[key].uid}
     end
     local seconds=math.max(0,math.floor(computer.uptime()-ui.started))
     local time=string.format('%02d:%02d:%02d',math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
     ui.summary='Tasks: '..#ids..' | Apiaries: '..active..' | Cycles: '..(st.cycles or 0)..' | Mutations: '..(st.mutations or 0)..' | Samples: '..(st.samples or 0)
     line(1,' OpenBeekeeper '..ui.version..' | Uptime '..time,0x1B160A,0xE0A52B)
     line(2,ui.summary)
-    line(3,ui.stopRequested and ' [ Stopping... ]' or ' [ Stop ]  [ Check update ]  [ Update ]',0xFFE28A,0x5C4516)
-    line(4,ui.stopRequested and 'Finishing the current transfer and clearing ME requests...' or ui.updateText,0xD1BA74)
-    line(5,' CURRENT TASKS ('..#rows..') - scroll here to browse',0xFFE28A)
+    line(3,ui.stopRequested and ' [ Stopping... ]' or ' [ Stop ]  [ Check update ]  [ Update ]  [ Settings ]',0xFFE28A,0x5C4516)
+    line(4,ui.stopRequested and 'Finishing the current transfer and clearing ME requests...' or (ui.notice or ui.updateText),0xD1BA74)
+    if ui.page then
+      line(5,' [ Conditions ] [ Tasks ] [ Back ] | '..ui.page:upper(),0xFFE28A,0x3D3115)
+      local settings=ui.settings or {options={},conditions={}}
+      if ui.confirm then
+        local selected=ui.confirm
+        rows={'DELETE '..(selected.kind=='cancel' and ('#'..selected.key) or ('Apiary '..machine(selected.key))),
+          label(selected.target),'Finishes current operation; planner keeps running.',
+          '[ Confirm delete ]   [ Back ]'}
+        actions={}; actions[4]={kind='confirm'}
+      elseif ui.page=='conditions' then
+        rows={}; actions={}
+        local function checkbox(text,enabled,action)
+          local prefix=enabled and '[x] ' or '[ ] '
+          local width=math.max(1,w-5); local length=unicode.len(text)
+          for pos=1,math.max(1,length),width do
+            rows[#rows+1]=(pos==1 and prefix or '    ')..unicode.sub(text,pos,pos+width-1)
+            actions[#rows]=action
+          end
+        end
+        checkbox('Mutations',settings.options.mutations~=false,{kind='option',key='mutations'})
+        checkbox('Gene sampling',settings.options.sampling~=false,{kind='option',key='sampling'})
+        rows[#rows+1]='Recipe conditions (all must be allowed):'
+        for _,text in ipairs(settings.conditions) do
+          checkbox(text,(settings.options.conditions or {})[text]~=false,{kind='condition',key=text})
+        end
+        if #settings.conditions==0 then rows[#rows+1]='No special conditions reported by the catalogue.' end
+      else
+        for index,text in ipairs(rows) do rows[index]='[ Delete ] '..text end
+        if #rows==0 then rows[1]='No current tasks.' end
+      end
+    else
+      line(5,' CURRENT TASKS ('..#rows..') - click a task to delete; scroll to browse',0xFFE28A)
+    end
+    ui.rowActions=actions
     local taskHeight=ui.taskEnd-5
     ui.taskOffset=math.max(0,math.min(ui.taskOffset,math.max(0,#rows-taskHeight)))
     for y=6,ui.taskEnd do line(y,rows[ui.taskOffset+y-5] or '') end
@@ -149,9 +185,11 @@ local function newDashboard()
     ui.offset=math.max(0,math.min(ui.offset,math.max(0,#ui.logs-logHeight)))
     local first=math.max(1,#ui.logs-ui.offset-logHeight+1)
     for y=ui.logStart,h-3 do line(y,ui.logs[first+y-ui.logStart] or '',0xE4D9AA) end
-    line(h-2,'Enter command | help | Ctrl+C: stop | Other commands stop auto first',0xD1BA74)
+    line(h-2,'Command | settings | help | Ctrl+C: stop | Other commands stop auto',0xD1BA74)
     line(h-1,'> '..unicode.sub(ui.input,math.max(1,unicode.len(ui.input)-w+4)),0xFFF3C4,0x3D3115)
-    line(h,' Stop/update preserve the queue; bees auto resumes.',0xD1BA74)
+    line(h,ui.page=='conditions' and ' Checkboxes allow attempts; the server validates recipe conditions.'
+      or ui.page and ' Deleting a task keeps planner rules; jobs may be recreated.'
+      or ' Stop/update preserve the queue; bees auto resumes.',0xD1BA74)
     ui.dirty=false; ui.lastDraw=computer.uptime()
   end
   function ui.pump()
@@ -179,7 +217,32 @@ local function newDashboard()
       if y==3 then
         if x<=9 then ui.stop()
         elseif x<=27 then ui.checkPending=true
-        elseif x<=39 then ui.stop('update','bees update') end
+        elseif x<=39 then ui.stop('update','bees update')
+        elseif x<=54 then
+          if ui.page then ui.page=nil else ui.page='conditions' end
+          ui.confirm=nil; ui.taskOffset=0
+        end
+      elseif y==5 and ui.page then
+        ui.confirm=nil; ui.taskOffset=0
+        if x<=16 then ui.page='conditions'
+        elseif x<=26 then ui.page='tasks'
+        else ui.page=nil end
+      elseif y>=6 and y<=(ui.taskEnd or 9) then
+        local action=(ui.rowActions or {})[ui.taskOffset+y-5]
+        if action then
+          if action.kind=='cancel' or action.kind=='cancelApiary' then
+            ui.confirm=action; ui.page='tasks'; ui.taskOffset=0
+          elseif action.kind=='confirm' then
+            if x<=20 then
+              ui.actions=ui.actions or {}; ui.actions[#ui.actions+1]=ui.confirm
+              ui.notice='Delete requested. Planner continues normally.'
+            end
+            ui.confirm=nil; ui.taskOffset=0
+          else
+            ui.actions=ui.actions or {}; ui.actions[#ui.actions+1]=action
+            ui.notice='Policy change queued for the next safe checkpoint.'
+          end
+        end
       end
       return true
     end)
