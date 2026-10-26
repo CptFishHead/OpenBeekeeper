@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.11.0: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.11.1: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -983,19 +983,35 @@ local function automate()
     end
     local legacy=readText(dir..'apiary-run.new') or readText(dir..'apiary-run')
     if legacy and not parse(legacy,'APIARY1').finished then refuse('unfinished legacy apiary journal; resume/adopt it first') end
+    local function waitBuffer(module)
+      for attempt=0,15 do
+        local occupied=false
+        for slot=1,9 do if alive(call(module.t.getStackInSlot,module.source,slot)) then occupied=true end end
+        if not occupied then return end
+        if attempt==15 then refuse('occupied staging buffer '..module.interface..'; ME is not accepting items') end
+        assert(event.pull(1)~='interrupted','Reset paused; repeat bees auto reset to continue')
+      end
+    end
     for _,module in pairs(modules) do
       for slot=1,9 do
         if call(module.m.getInterfaceConfiguration,slot)~=nil then refuse('active interface request '..module.interface..' slot '..slot) end
-        if alive(call(module.t.getStackInSlot,module.source,slot)) then refuse('occupied staging buffer '..module.interface..' slot '..slot) end
       end
+      waitBuffer(module)
+    end
+    local hasOutputs=false
+    local function resetOutputs(kind)
+      if kind=='apiary' then return 7,15 elseif kind=='analyzer' then return 9,12
+      elseif kind=='mutatron' then return 3,3 else return 4,4 end
     end
     for _,m in pairs(machines) do
-      local slots=m.kind=='apiary' and {1,2,7,8,9,10,11,12,13,14,15}
-        or m.kind=='analyzer' and {1,3,4,5,6,7,8,9,10,11,12}
-        or m.kind=='mutatron' and {1,2,3} or {3,4}
+      local slots=m.kind=='apiary' and {1,2}
+        or m.kind=='analyzer' and {1,3,4,5,6,7,8}
+        or m.kind=='mutatron' and {1,2} or {3}
       for _,slot in ipairs(slots) do
         if alive(call(m.module.t.getStackInSlot,m.side,slot)) then refuse('occupied '..m.kind..' '..m.key..' slot '..slot) end
       end
+      local lo,hi=resetOutputs(m.kind)
+      for slot=lo,hi do if alive(call(m.module.t.getStackInSlot,m.side,slot)) then hasOutputs=true end end
     end
     local databases={}
     for _,entry in ipairs(tools.databases) do databases[entry.address]=entry.proxy end
@@ -1013,7 +1029,7 @@ local function automate()
         if not matches then refuse('owned database slot changed externally: '..key..'; preserve its descriptor') end
       end
     end
-    if st.lastResetArchive and not next(st.refs) and not next(st.flows) then
+    if st.lastResetArchive and not st.reset and not hasOutputs and not next(st.refs) and not next(st.flows) then
       -- Repair an interrupted final backup write without revisiting old refs.
       save()
       local text=assert(readText(path))
@@ -1040,6 +1056,26 @@ local function automate()
     end
     local reset=st.reset
     assert(type(reset.archive)=='string' and fs.exists(reset.archive..'.index'),'Reset archive missing; preserve journal')
+    -- Output extraction is idempotent: archive the queue first, move only the
+    -- actual remaining stacks, and clear descriptors only after ME accepts them.
+    for _,m in pairs(machines) do
+      local lo,hi=resetOutputs(m.kind)
+      for slot=lo,hi do
+        local v=call(m.module.t.getStackInSlot,m.side,slot)
+        while alive(v) do
+          local moved=call(m.module.t.transferItem,m.side,m.module.source,v.size,slot)
+          assert(type(moved)=='number' and moved>=0 and moved<=v.size,'Invalid reset output transfer')
+          if moved==0 then
+            waitBuffer(m.module)
+            moved=call(m.module.t.transferItem,m.side,m.module.source,v.size,slot)
+            assert(type(moved)=='number' and moved>0 and moved<=v.size,'Reset output transfer blocked at '..m.key..' slot '..slot..'; fix ME supply and repeat bees auto reset')
+          end
+          print('RESET RETURN',m.kind,moved,v.label or v.name)
+          v=call(m.module.t.getStackInSlot,m.side,slot)
+        end
+      end
+    end
+    for _,module in pairs(modules) do waitBuffer(module) end
     if reset.clearing then
       local r=assert(st.refs[reset.clearing],'Reset reference missing')
       if call(databases[r.database].get,r.slot)~=nil then refuse('interrupted database clear is ambiguous at '..r.database..':'..r.slot..'; inspect/archive the descriptor before manually clearing this slot') end
@@ -1815,7 +1851,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.11.0 - read-only discovery")
+  print("OpenBeekeeper 0.11.1 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")

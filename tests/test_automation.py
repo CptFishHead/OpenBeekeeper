@@ -663,7 +663,6 @@ class AutomationTests(unittest.TestCase):
 
     def test_reset_refuses_occupied_machine_buffer_request_and_unresolved_ownership(self):
         blockers = (
-            "processors[5][9]=beeStack('b','drone',1)",
             "apiaries[1][2][1]=beeStack('b','queen',1)",
             "bins[1][2]=beeStack('b','drone',1)",
             "configurations[1][1]={name='unrelated',size=1}",
@@ -676,10 +675,39 @@ class AutomationTests(unittest.TestCase):
         for blocker in blockers:
             with self.subTest(blocker=blocker):
                 _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
-                lua.execute("local p='/home/.openbeekeeper-data/automation'; local ser=require('serialization'); local s=ser.unserialize(stateFiles[p]); "+blocker+"; stateFiles[p]=ser.serialize(s)")
+                lua.execute("interruptAt=nil; local p='/home/.openbeekeeper-data/automation'; local ser=require('serialization'); local s=ser.unserialize(stateFiles[p]); "+blocker+"; stateFiles[p]=ser.serialize(s)")
                 before = lua.globals().stateFiles['/home/.openbeekeeper-data/automation']
                 self.assertIn('RESET REFUSED',self.invoke_auto(lua))
                 self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/automation'],before)
+
+    def test_reset_returns_only_outputs_and_retries_blocked_partial_transfers(self):
+        _, _, lua=self.execute("add('a','drone',33); stallProcessor='analyzer'; interruptAt=3")
+        lua.execute(r'''
+          processors[5]={}; partialFull=true; partialHarvest=true
+          processors[5][9]=beeStack('a','drone',5)
+          processors[6][4]=beeStack('b','princess',1)
+          processors[7][4]={name='gendustry:gene_sample',label='Bee Sample - Species: b',size=1}
+          processors[8][3]=beeStack('c','queen',1)
+          apiaries[1][2][7]=beeStack('d','drone',4)
+          local original=devices.t5.transferItem
+          devices.t5.transferItem=function(...) if blockReset then return 0 end return original(...) end
+          blockReset=true
+          local originalClear=devices.db.clear
+          devices.db.clear=function(slot) assert(not processors[5][9],'OUTPUTS MUST RETURN BEFORE DB CLEANUP'); return originalClear(slot) end
+        ''')
+        def reset_empty():
+            before=len(list(lua.globals().lines.values()))
+            lua.eval('function(src) return assert(load(src))("auto","reset","empty") end')(runtime.SOURCE)
+            return '\n'.join(row.text for i,row in lua.globals().lines.items() if i>before)
+        self.assertIn('Reset output transfer blocked',reset_empty())
+        self.assertIsNotNone(lua.globals().stateFiles['/home/.openbeekeeper-data/automation-reset-1.main'])
+        lua.execute('blockReset=false')
+        self.assertIn('AUTO RESET complete',self.invoke_auto(lua))
+        for module,slot in ((5,9),(6,4),(7,4),(8,3)):
+            self.assertIsNone(lua.globals().processors[module][slot])
+        self.assertIsNone(lua.globals().apiaries[1][2][7])
+        self.assertEqual(lua.globals().processors[6][1].name,'gendustry:gene_template')
+        self.assertEqual(lua.globals().processors[6][2].size,64)
 
     def test_reset_archive_failure_leaves_journal_and_owned_database_untouched(self):
         _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
