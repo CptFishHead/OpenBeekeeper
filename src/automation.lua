@@ -394,7 +394,7 @@ local function automate()
     if not source then
       if computer.uptime()-lease.since<15 then return nil end
       cleanLease(interface)
-      return false,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. Retrying this job; other jobs continue."
+      return false,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. Request cancelled; other jobs continue."
     end
     if m.kind=='analyzer' and count>1 and not intention.batchPeers then
       intention.batchPeers={}
@@ -601,13 +601,23 @@ local function automate()
   local deliveryRetry={}
   local function serviceFlow()
     local f=flow; if not f then return end
+    if f.reselect then
+      if st.needFresh then return end
+      f.reselect=nil; save()
+    end
     if deliveryRetry[currentID] and computer.uptime()<deliveryRetry[currentID] then return end
     if f.pendingP then f.p=reference(f.pendingP); f.pendingP=nil; save() end
     if f.pendingD then f.d=reference(f.pendingD); f.pendingD=nil; save() end
     local step=f.steps[f.step]
     if not step then finishFlow(); return end
     local selected=(step=='queen' or step:sub(-1)=='P') and f.p or f.d
-    if step~='mate' and not materialize(selected) then return end
+    if step~='mate' and not materialize(selected) then
+      if not f.op then
+        print('REPLAN',f.target,'bee no longer present in live ME lookup')
+        st.needFresh=true; finishFlow()
+      end
+      return
+    end
     if step:match('^analyze') and st.refs[selected].analyzed and not f.op then
       f.step=f.step+1; save(); return
     end
@@ -684,13 +694,19 @@ local function automate()
                   end
                 end
                 if not started then
-                  -- Only a not-yet-processed parent may be reselected. Exact
-                  -- outputs remain fixed to their captured database entry.
-                  if r.filter then
-                    r.ready=nil; r.analyzed=nil
-                    if step:match('^imprint') or step=='queen' then f.step=math.max(1,f.step-1) end
+                  -- Captivity generations are not bee identity. Reselect the
+                  -- current live variant, then repeat its preparation; never
+                  -- carry analyzed/imprinted claims across an NBT substitution.
+                  local previous=call(db(r).get,r.slot)
+                  r.filter={name=previous and previous.name or r.name,label=previous and previous.label or r.label}
+                  r.ready=nil; r.analyzed=nil; r.imprinted=nil; r.inME=true
+                  local suffix=feed.ref==f.p and 'P' or 'D'
+                  for index,value in ipairs(f.steps) do
+                    if value=='analyze'..suffix then f.step=index; break end
                   end
-                  f.op=nil; save()
+                  f.op=nil; f.reselect=true; st.needFresh=true
+                  print('REPLAN',f.target,'refresh live bee variant after failed exact request',reason)
+                  save(); return
                 end
               end
               warn(reason or ("Input transfer blocked at "..m.key)); return
@@ -1010,7 +1026,7 @@ local function automate()
       currentID=nil; flow=nil
       do
         local count=0; for _ in pairs(st.flows) do count=count+1 end
-        while count<flowLimit do
+        while count<flowLimit and not st.needFresh do
           local started=false
           for _=1,#schedule do
             cursor=cursor%#schedule+1

@@ -594,7 +594,7 @@ class AutomationTests(unittest.TestCase):
     def test_reset_stale_exact_request_archives_journals_and_preserves_configuration(self):
         text, _, lua = self.execute("add('a','drone',33); noSupply=true; dbSlots[1]={name='unrelated',size=1}; interruptAt=50")
         self.assertIn('Exact item not delivered within 15 seconds: a / drone', text)
-        self.assertIn('Retrying this job; other jobs continue', text)
+        self.assertIn('Request cancelled; other jobs continue', text)
         lua.execute("""
           local p='/home/.openbeekeeper-data/automation'
           stateFiles[p..'.new']=stateFiles[p]
@@ -623,6 +623,55 @@ class AutomationTests(unittest.TestCase):
         lua.execute("devices.me.getItemsInNetwork=function() return {} end; interruptAt=clock+3")
         self.assertNotIn('Exact item not delivered',self.invoke_auto(lua,action='resume'))
 
+    def test_changed_captivity_nbt_reselects_live_drone_and_repeats_imprinting(self):
+        setup=r'''
+          add('a','drone',33); interruptAt=90
+          generationChanged=false; imprintRequests=0
+          local original=devices.if6.setInterfaceConfiguration
+          devices.if6.setInterfaceConfiguration=function(slot,address,index,count)
+            if not address then return original(slot) end
+            imprintRequests=imprintRequests+1
+            local v=stock['a:drone']
+            if not generationChanged then
+              generationChanged=true; v._nbt='analyzed|raw|generations2'; v.individual.isAnalyzed=true
+            end
+            local previous=noSupply
+            noSupply=dbSlots[index]._nbt~=v._nbt
+            local result=original(slot,address,index,count); noSupply=previous
+            return result
+          end
+        '''
+        text, _, lua=self.execute(setup)
+        self.assertIn('refresh live bee variant',text)
+        self.assertGreaterEqual(lua.globals().imprintRequests,2)
+        self.assertEqual(list(lua.globals().sampled.values()).count('a'),1)
+        imprints=[v for v in lua.globals().visits.values() if v.kind=='imprinter']
+        self.assertEqual(len(imprints),1)
+        self.assertIn('generations2',imprints[0].nbt)
+
+    def test_disappeared_bee_is_not_requested_again_after_next_me_snapshot(self):
+        setup=r'''
+          add('a','drone',33); noSupply=true; interruptAt=70
+          requestsA=0
+          local original=devices.if5.setInterfaceConfiguration
+          devices.if5.setInterfaceConfiguration=function(slot,address,index,count)
+            if address and dbSlots[index].individual.ident=='a' then
+              requestsA=requestsA+1
+              stock['a:drone'].size=0
+            end
+            return original(slot,address,index,count)
+          end
+        '''
+        text, _, lua=self.execute(setup)
+        self.assertEqual(lua.globals().requestsA,1)
+        self.assertIn('REPLAN a',text)
+        self.assertIsNone(lua.globals().configurations[5][9])
+        state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertEqual(len(list(state.flows.values())),0)
+        self.assertEqual(len(list(state.refs.values())),0)
+        calls=list(lua.globals().networkCalls.values())
+        self.assertTrue(all(b-a>=20 for a,b in zip(calls,calls[1:])))
+
     def test_missing_exact_bee_waits_without_stopping_other_jobs_and_resumes(self):
         setup = r'''
           add('a','drone',33); add('b','princess',1); add('b','drone',31)
@@ -636,7 +685,7 @@ class AutomationTests(unittest.TestCase):
           end
         '''
         text, _, lua = self.execute(setup)
-        self.assertIn('Retrying this job; other jobs continue',text)
+        self.assertIn('Request cancelled; other jobs continue',text)
         self.assertGreater(lua.globals().cycles,0)
         self.assertGreaterEqual(lua.globals().stock['b:drone'].size,32)
         self.assertNotIn('a',list(lua.globals().sampled.values()))
