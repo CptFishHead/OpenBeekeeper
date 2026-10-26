@@ -6,6 +6,7 @@ local function automate()
   local event=require("event")
   local dir="/home/.openbeekeeper-data/"
   local path=dir.."automation"
+  local optionsPath=dir..'automation-options'
   local function call(method,...)
     local value,err=read(method,...); assert(not err,err); return value
   end
@@ -14,6 +15,26 @@ local function automate()
     assert(ok and type(value)=="table" and value.schema==schema,"Invalid "..schema.." journal; preserve it")
     return value
   end
+  local options=readText(optionsPath)
+  options=options and parse(options,'AUTOOPTIONS1') or {schema='AUTOOPTIONS1',batch=64,queue=0,mutations=true,sampling=true}
+  assert(type(options.batch)=='number' and options.batch%1==0 and options.batch>=1 and options.batch<=64
+    and type(options.queue)=='number' and options.queue%1==0 and options.queue>=0 and options.queue<=128
+    and type(options.mutations)=='boolean' and type(options.sampling)=='boolean','Invalid automation options; preserve configuration')
+  if args[2]=='config' then
+    local key,value=args[3],args[4]
+    if key then
+      assert(key=='batch' or key=='queue' or key=='mutations' or key=='sampling','Options: batch, queue, mutations, sampling')
+      if key=='batch' or key=='queue' then
+        value=value=='auto' and key=='queue' and 0 or tonumber(value)
+        assert(value and value%1==0 and value>=(key=='batch' and 1 or 0) and value<=(key=='batch' and 64 or 128),'Invalid option value')
+      else assert(value=='on' or value=='off','Use on/off'); value=value=='on' end
+      options[key]=value
+      if not fs.exists(dir) then assert(fs.makeDirectory(dir)) end
+      writeText(optionsPath,ser.serialize(options))
+    end
+    print('AUTO CONFIG batch='..options.batch..'; queue='..(options.queue==0 and 'auto' or options.queue)..'; mutations='..tostring(options.mutations)..'; sampling='..tostring(options.sampling))
+    return true
+  end
   local raw=readText(path..".new") or readText(path)
   local st=raw and parse(raw,"AUTO1") or {schema="AUTO1",refs={},apiaries={},seq=0,cycles=0,samples=0,mutations=0}
   st.flows=st.flows or {}
@@ -21,12 +42,12 @@ local function automate()
   local flow,currentID
   if args[2]=="status" then
     print("AUTOMATION: apiary cycles="..st.cycles.."; sampled drones="..st.samples.."; mutations="..st.mutations)
-    for id,f in pairs(st.flows) do print("FLOW",id,f.mode,f.target,"step="..f.step) end
+    for id,f in pairs(st.flows) do print("FLOW",id,f.mode,f.target,"step="..f.step,f.op and (f.op.key..' '..f.op.phase) or 'queued',f.wait or '') end
     for key,job in pairs(st.apiaries) do print("APIARY",key,job.uid) end
     if st.reset then print('RESET CLEANUP PENDING; use bees auto reset; archive: '..tostring(st.reset.archive)) end
     print(st.wait or "No resource wait recorded."); return true
   end
-  assert(args[2]==nil or args[2]=="resume" or args[2]=="reset","Use bees auto [resume/status/reset]")
+  assert(args[2]==nil or args[2]=="resume" or args[2]=="reset" or args[2]=='check',"Use bees auto [resume/status/check/config/reset]")
   assert(args[3]==nil or (args[2]=='reset' and args[3]=='empty'),'Use bees auto reset [empty]')
   assert(not st.reset or args[2]=="reset","Reset cleanup is pending; use bees auto reset before resuming")
   assert(not fs.exists(BIND_PENDING) and not fs.exists(pendingPath),"Finish bind/interface recovery first")
@@ -77,7 +98,7 @@ local function automate()
     local function refuse(reason)
       error('RESET REFUSED: '..reason..'; use bees auto status and resume existing work with bees auto. Empty machines alone do not prove internal work finished.')
     end
-    if st.lease or st.resource then refuse('unresolved interface lease/resource transfer') end
+    if st.lease or st.resource or next(st.leases or {}) or next(st.resources or {}) then refuse('unresolved interface lease/resource transfer') end
     if not manuallyEmpty and next(st.apiaries) then refuse('active apiary ownership remains in the journal') end
     for id,f in pairs(manuallyEmpty and {} or st.flows) do
       local op=f.op
@@ -170,8 +191,32 @@ local function automate()
     return true
   end
   for _,kind in ipairs({'apiary','analyzer','imprinter','sampler','mutatron'}) do
-    assert(#groups[kind]>0,"No bound "..kind.." (advanced mutatron selection is not supported)")
     table.sort(groups[kind],function(a,b) if a.side~=b.side then return a.side<b.side end return a.key<b.key end)
+  end
+  local zones={breeding=0,incubator=0,unassigned=0,off=0}
+  local configuration=climateConfiguration()
+  for _,m in ipairs(groups.apiary) do
+    local zone=climateZone(m,configuration)
+    zones[zone.role]=(zones[zone.role] or 0)+1
+  end
+  local capabilities={queen=#groups.analyzer>0 and zones.incubator>0}
+  local prepare=#groups.analyzer>0 and #groups.imprinter>0
+  capabilities.multiply=prepare and zones.breeding>0
+  capabilities.restore=capabilities.multiply
+  capabilities.mutate=prepare and options.mutations and #groups.mutatron>0 and zones.incubator>0
+  capabilities.sample=prepare and options.sampling and #groups.sampler>0
+  print('MODULES apiaries='..#groups.apiary..' breeding='..zones.breeding..' incubator='..zones.incubator..' unassigned='..zones.unassigned..'; analyzers='..#groups.analyzer..' imprinters='..#groups.imprinter..' mutatrons='..#groups.mutatron..' samplers='..#groups.sampler..' databases='..#tools.databases)
+  print('ENABLED breeding='..tostring(capabilities.multiply)..' mutations='..tostring(capabilities.mutate)..' sampling='..tostring(capabilities.sample)..'; analyzer batch='..options.batch)
+  if zones.unassigned>0 then print('Unassigned apiaries do not run; configure bees zones before starting.') end
+  if args[2]=='check' then
+    for _,m in pairs(machines) do
+      if m.kind=='imprinter' then
+        local template=call(m.module.t.getStackInSlot,m.side,1)
+        if not alive(template) or template.name~='gendustry:gene_template' then print('MISSING template at '..m.key) end
+      end
+    end
+    print('Read-only check. Change topology with bees bind; assign roles with bees zones; policy with bees auto config.')
+    return true
   end
   local names,aliases,recipes={},{},{}
   for _,v in ipairs(catalogues) do
@@ -181,7 +226,19 @@ local function automate()
       recipes=call(v.proxy.getBeeBreedingData) or {}; break
     end
   end
-  assert(next(names),"Forestry catalogue unavailable")
+  if not next(names) then print('Forestry catalogue unavailable: existing species can breed; new mutation recipes are unavailable.') end
+  local stock,samples={},{}
+  local function adjust(v,count)
+    local uid,kind=bee(v)
+    if uid then
+      local e=stock[uid] or {uid=uid,princess=0,drone=0,queen=0}; stock[uid]=e
+      e[kind]=math.max(0,e[kind]+count)
+      if count>0 then e[kind..'Item']=v end
+    elseif count>0 then
+      local g=gene(v)
+      if g and g.chromosome==0 then samples[g.allele]='G' end
+    end
+  end
   local function item(m,slot) return call(m.module.t.getStackInSlot,m.side,slot) end
   local function outputSlots(kind)
     if kind=='apiary' then return 7,15 elseif kind=='analyzer' then return 9,12
@@ -220,12 +277,20 @@ local function automate()
     assert(call(db(r).get,r.slot)==nil,"Could not clear owned database entry")
     st.refs[id]=nil; save()
   end
-  local function cleanLease()
-    if not st.lease then return end
-    local p=component.proxy(st.lease.interface)
-    call(p.setInterfaceConfiguration,9)
-    assert(call(p.getInterfaceConfiguration,9)==nil,"Could not clear automation request 9")
-    st.lease=nil; save()
+  st.leases=st.leases or {}
+  st.resources=st.resources or {}
+  local function cleanLease(interface)
+    if st.lease then
+      st.leases[st.lease.interface]=st.lease; st.lease=nil; save()
+    end
+    local keys={}
+    for key in pairs(st.leases) do if not interface or key==interface then keys[#keys+1]=key end end
+    for _,key in ipairs(keys) do
+      local p=component.proxy(key)
+      call(p.setInterfaceConfiguration,9)
+      assert(call(p.getInterfaceConfiguration,9)==nil,"Could not clear automation request 9")
+      st.leases[key]=nil; save()
+    end
   end
   local function emptyBuffer(module)
     for slot=1,9 do if alive(call(module.t.getStackInSlot,module.source,slot)) then return false end end
@@ -236,69 +301,97 @@ local function automate()
     if ref.uid then local uid,kind=bee(v); return uid==ref.uid and kind==ref.kind end
     return v.name==ref.name and v.label==ref.label
   end
-  -- Exact database requests, with a real NBT comparison before each transfer.
+  -- Per-interface requests are polled, never slept on. Database entries retain
+  -- exact item identity; one owner serializes every use of a shared interface.
   local function deliver(m,id,destination,count,intention)
     local r=assert(st.refs[id],"Missing owned bee reference")
-    for attempt=0,15 do
-      if emptyBuffer(m.module) then break end
-      assert(attempt<15,"Interface buffer is occupied: "..m.module.address); tick()
+    local interface=m.module.interface
+    local owner=id..':'..m.key..':'..destination
+    local lease=st.leases[interface]
+    if lease and lease.owner~=owner then return nil end
+    if not lease then
+      if not emptyBuffer(m.module) then return nil end
+      st.leases[interface]={interface=interface,owner=owner,since=computer.uptime()}; save()
+      assert(call(m.module.m.setInterfaceConfiguration,9,r.database,r.slot,count),"Interface request failed")
+      lease=st.leases[interface]
     end
-    st.lease={interface=m.module.interface}; save()
-    assert(call(m.module.m.setInterfaceConfiguration,9,r.database,r.slot,count),"Interface request failed")
     local source
-    for attempt=0,15 do
-      for slot=1,9 do
-        local v=call(m.module.t.getStackInSlot,m.module.source,slot)
-        if alive(v) then
-          assert(not source and matches(v,r) and v.size<=count,"Unexpected item in staging interface")
-          assert(call(m.module.t.compareStackToDatabase,m.module.source,slot,r.database,r.slot,true),"Staged item NBT differs from the owned descriptor")
-          source=slot
+    for slot=1,9 do
+      local v=call(m.module.t.getStackInSlot,m.module.source,slot)
+      if alive(v) then
+        assert(not source and matches(v,r) and v.size<=count,"Unexpected item in staging interface")
+        assert(call(m.module.t.compareStackToDatabase,m.module.source,slot,r.database,r.slot,true),"Staged item NBT differs from the owned descriptor")
+        source=slot
+      end
+    end
+    if not source then
+      if computer.uptime()-lease.since<15 then return nil end
+      cleanLease(interface)
+      return false,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. Retrying this job; other jobs continue."
+    end
+    if m.kind=='analyzer' and count>1 and not intention.batchPeers then
+      intention.batchPeers={}
+      for other,ref in pairs(st.refs) do
+        if other~=id and ref.ready and not ref.analyzed and ref.uid==r.uid and ref.kind==r.kind
+            and call(m.module.t.compareStackToDatabase,m.module.source,source,ref.database,ref.slot,true) then
+          intention.batchPeers[#intention.batchPeers+1]=other
         end
       end
-      if source then break end
-      if attempt==15 then
-        cleanLease()
-        return false,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. Retrying this job; other jobs continue."
-      end
-      tick()
     end
-    intention.armed=true; save() -- Recovery must never blindly replay a triggering input.
+    intention.armed=true; save()
     local v=call(m.module.t.getStackInSlot,m.module.source,source)
     local moved=call(m.module.t.transferItem,m.module.source,m.side,v.size,source,destination)
     assert(type(moved)=="number" and moved>=0 and moved<=v.size,"Invalid loading result")
-    if moved==0 then intention.armed=false; save() end
-    cleanLease()
+    if moved==0 then intention.armed=false; save()
+    else
+      adjust(v,-moved); r.inME=false
+      for _,other in ipairs(intention.batchPeers or {}) do if st.refs[other] then st.refs[other].inME=false end end
+      save()
+    end
+    cleanLease(interface)
     return moved>0
   end
   local function reference(v)
     local id=allocate(); local r=st.refs[id]
-    r.filter={name=v.name,label=v.label}; r.uid,r.kind=bee(v); r.name=v.name; r.label=v.label
+    r.filter={name=v.name,label=v.label}; r.uid,r.kind=bee(v); r.name=v.name; r.label=v.label; r.available=v.size
     save(); return id
   end
   local function materialize(id)
     local r=st.refs[id]
-    if r.ready then return end
+    if r.ready then return true end
+    call(db(r).clear,r.slot)
     call(me.proxy.store,r.filter,r.database,r.slot,1)
     local v=call(db(r).get,r.slot)
-    assert(matches(v,r),"ME item no longer matches requested descriptor")
-    r.ready=true; save()
+    if not matches(v,r) then warn('ME needs '..tostring(r.uid)..' / '..tostring(r.kind)); return false end
+    r.analyzed=type(v.individual)=='table' and v.individual.isAnalyzed==true
+    r.ready=true; r.inME=true; save(); return true
   end
   local resourceRetry={}
   local function resource(m,slot,label)
-    if alive(item(m,slot)) then return true end
-    if resourceRetry[label] and computer.uptime()<resourceRetry[label] then return false end
-    resourceRetry[label]=computer.uptime()+ME_INTERVAL
-    local id=st.resource or allocate(); st.resource=id; save()
-    local r=st.refs[id]
-    call(me.proxy.store,{label=label},r.database,r.slot,1)
-    local v=call(db(r).get,r.slot)
-    if not alive(v) or v.label~=label then
-      release(id); st.resource=nil; save(); warn("ME needs "..label); return false
+    local key=m.key..':'..slot
+    local job=st.resources[key]
+    if alive(item(m,slot)) and not job then return true end
+    if not job then
+      if resourceRetry[key] and computer.uptime()<resourceRetry[key] then return false end
+      local id=allocate(); local r=st.refs[id]
+      st.resources[key]={ref=id,intention={}}; save(); job=st.resources[key]
+      call(me.proxy.store,{label=label},r.database,r.slot,1)
+      local v=call(db(r).get,r.slot)
+      if not alive(v) or v.label~=label then
+        st.resources[key]=nil; save(); release(id)
+        resourceRetry[key]=computer.uptime()+ME_INTERVAL; warn('ME needs '..label); return false
+      end
+      r.name=v.name; r.label=v.label; r.uid=nil; r.kind=nil; r.ready=true; save()
     end
-    r.name=v.name; r.label=v.label; r.uid=nil; r.kind=nil; save()
-    local _,reason=deliver(m,id,slot,math.min(v.maxSize or 16,16),{})
-    if reason then warn(reason) end
-    release(id); st.resource=nil; save()
+    local r=st.refs[job.ref]
+    local moved,reason
+    if alive(item(m,slot)) or job.intention.armed then moved=true
+    else moved,reason=deliver(m,job.ref,slot,16,job.intention) end
+    if moved==nil then return false end
+    if reason then warn(reason); resourceRetry[key]=computer.uptime()+ME_INTERVAL end
+    local lease=st.leases[m.module.interface]
+    if lease and lease.owner==job.ref..':'..m.key..':'..slot then cleanLease(m.module.interface) end
+    st.resources[key]=nil; save(); release(job.ref)
     return alive(item(m,slot))
   end
   local function fluidReady(m)
@@ -382,10 +475,11 @@ local function automate()
     return best,nil,kind=='apiary' and ('No free '..tostring(purpose)..' zone'..(requiredT and ' '..requiredT..'/'..requiredH or '')..'; inspect bees zones') or nil
   end
   local function returnSlot(m,slot)
+    if st.leases[m.module.interface] then return false end
     local v=item(m,slot); if not alive(v) then return true end
     local moved=call(m.module.t.transferItem,m.side,m.module.source,v.size,slot)
     assert(type(moved)=="number" and moved>=0 and moved<=v.size,"Invalid bulk return")
-    if moved>0 then print("RETURN",m.kind,moved,v.label or v.name) end
+    if moved>0 then adjust(v,moved); print("RETURN",m.kind,moved,v.label or v.name) end
     return not alive(item(m,slot))
   end
   local function serviceApiaries()
@@ -394,7 +488,7 @@ local function automate()
       local empty=true
       for slot=7,15 do if not returnSlot(m,slot) then empty=false end end
       if not alive(item(m,1)) and not alive(item(m,2)) and empty then
-        st.apiaries[key]=nil; st.cycles=st.cycles+1; st.needFresh=true; save()
+        st.apiaries[key]=nil; st.cycles=st.cycles+1; save()
         print("APIARY COMPLETE",key,job.uid)
       end
     end
@@ -402,7 +496,7 @@ local function automate()
   local function finishFlow()
     local f=assert(flow)
     waiting[currentID]=nil
-    st.flows[currentID]=nil; flow=nil; st.needFresh=true; save()
+    st.flows[currentID]=nil; flow=nil; save()
     release(f.p); release(f.d)
   end
   local function copyOutput(m,slot,id)
@@ -415,9 +509,13 @@ local function automate()
     if deliveryRetry[currentID] and computer.uptime()<deliveryRetry[currentID] then return end
     if f.pendingP then f.p=reference(f.pendingP); f.pendingP=nil; save() end
     if f.pendingD then f.d=reference(f.pendingD); f.pendingD=nil; save() end
-    for _,id in ipairs({f.p or false,f.d or false}) do if id then materialize(id) end end
     local step=f.steps[f.step]
     if not step then finishFlow(); return end
+    local selected=(step=='queen' or step:sub(-1)=='P') and f.p or f.d
+    if step~='mate' and not materialize(selected) then return end
+    if step:match('^analyze') and st.refs[selected].analyzed and not f.op then
+      f.step=f.step+1; save(); return
+    end
     local kind=step:match('^analyze') and 'analyzer' or step:match('^imprint') and 'imprinter'
       or step=='sample' and 'sampler' or step=='mate' and (f.mode=='mutate' and 'mutatron' or 'apiary') or 'apiary'
     if not f.op then
@@ -433,7 +531,11 @@ local function automate()
       if step=='mate' then
         feeds={{ref=f.d,slot=2},{ref=f.p,slot=1}}
       elseif step=='queen' then feeds={{ref=f.p,slot=1}}
-      else feeds={{ref=step:sub(-1)=='P' and f.p or f.d,slot=analysisSlot or 3}} end
+      else
+        local id=step:sub(-1)=='P' and f.p or f.d
+        local r=st.refs[id]
+        feeds={{ref=id,slot=analysisSlot or 3,count=kind=='analyzer' and r.kind=='drone' and math.min(options.batch,r.available or 1) or 1}}
+      end
       f.op={key=m.key,feeds=feeds,phase='feeding',ticks=0}; f.wait=nil; waiting[currentID]=nil; st.wait=nil; save()
       if kind=='mutatron' and f.conditions and #f.conditions>0 then
         print('CONDITIONAL ATTEMPT',f.target,table.concat(f.conditions,'; '),'requirements are not verified by OC; server decides availability')
@@ -452,13 +554,22 @@ local function automate()
             -- The triggering item may be internal/already output. Never replay it.
             feed.loaded=true; save()
           else
-            local delivered,reason=deliver(m,feed.ref,feed.slot,1,feed)
+            local delivered,reason=deliver(m,feed.ref,feed.slot,feed.count or 1,feed)
+            if delivered==nil then return end
             if not delivered then
               if reason then
                 deliveryRetry[currentID]=computer.uptime()+ME_INTERVAL
                 local started=false
                 for _,input in ipairs(op.feeds) do if input.armed or input.loaded then started=true end end
-                if not started then f.op=nil; save() end
+                if not started then
+                  -- Only a not-yet-processed parent may be reselected. Exact
+                  -- outputs remain fixed to their captured database entry.
+                  if r.filter then
+                    r.ready=nil; r.analyzed=nil
+                    if step:match('^imprint') or step=='queen' then f.step=math.max(1,f.step-1) end
+                  end
+                  f.op=nil; save()
+                end
               end
               warn(reason or ("Input transfer blocked at "..m.key)); return
             end
@@ -510,7 +621,19 @@ local function automate()
         local same=capture.ref and uid==capture.uid and k==capture.kind
           or not capture.ref and physical.name==capture.name and physical.label==capture.label
         if same then
-          if capture.ref then copyOutput(m,capture.slot,capture.ref); capture.copied=true; save() end
+          if st.leases[m.module.interface] then return end
+          if capture.ref then
+            copyOutput(m,capture.slot,capture.ref)
+            if kind=='analyzer' then
+              for _,other in ipairs(op.feeds[1].batchPeers or {}) do
+                if st.refs[other] then
+                  copyOutput(m,capture.slot,other)
+                  st.refs[other].ready=true; st.refs[other].analyzed=true; st.refs[other].inME=true; st.refs[other].filter=nil
+                end
+              end
+            end
+            capture.copied=true; save()
+          end
           if not returnSlot(m,capture.slot) then return end
         else
           assert(capture.copied,'Owned output changed before capture completed')
@@ -520,11 +643,12 @@ local function automate()
         local r=st.refs[capture.ref]; local v=call(db(r).get,r.slot)
         local uid,k=bee(v or {})
         assert(uid==capture.uid and k==capture.kind,"Captured output descriptor missing")
-        r.uid=uid; r.kind=k; r.filter=nil; r.ready=true; save()
+        r.uid=uid; r.kind=k; r.filter=nil; r.ready=true; r.inME=true; save()
         local active=type(v.individual)=='table' and v.individual.active
         local fertility=type(active)=='table' and tonumber(active.fertility)
         if fertility and fertility>=1 and fertility<=64 then r.fertility=fertility; save() end
-        if kind=='analyzer' then r.analyzed=true; save()
+        if kind=='mutatron' then r.analyzed=nil; r.imprinted=nil; save()
+        elseif kind=='analyzer' then r.analyzed=true; save()
         elseif kind=='imprinter' then r.analyzed=true; r.imprinted=true; save() end
       end
       if capture.failed then
@@ -534,7 +658,7 @@ local function automate()
       elseif kind=='mutatron' then
         st.mutations=st.mutations+1
         print("MUTATION RESULT",capture.uid,"wanted",f.target,capture.uid==f.target and 'MATCH' or 'SIDE SPECIES SAVED')
-        local oldDrone=f.d; f.d=nil; f.mode='queen'; f.steps={'analyzeP','queen'}; f.step=1; f.op=nil; save(); release(oldDrone)
+        local oldDrone=f.d; f.d=nil; f.target=capture.uid; f.mode='queen'; f.steps={'analyzeP','queen'}; f.step=1; f.op=nil; save(); release(oldDrone)
       elseif kind=='sampler' then
         if not capture.applied then
           st.samples=st.samples+1; capture.applied=true; save()
@@ -578,7 +702,7 @@ local function automate()
       or mode=='queen' and {'analyzeP','queen'} or {'analyzeP','imprintP','analyzeD','imprintD','mate'}}
     f.pendingP=p; f.pendingD=d; f.conditions=conditions; st.seq=st.seq+1; st.flows[tostring(st.seq)]=f; st.wait=nil; save(); print("FLOW",mode,target)
   end
-  local function choose(stock,samples)
+  local function choose(stock,samples,category)
     local observed=stock
     local incoming,predicted,load={},{},{}
     for _,j in pairs(st.apiaries) do
@@ -597,12 +721,14 @@ local function automate()
         local pending=f[role=='p' and 'pendingP' or 'pendingD']
         local uid,k
         if r then uid,k=r.uid,r.kind elseif pending then uid,k=bee(pending) end
-        if uid and available[uid] then available[uid][k]=math.max(0,available[uid][k]-1) end
+        if uid and available[uid] and (not r or r.inME~=false) then available[uid][k]=math.max(0,available[uid][k]-1) end
       end
       if f.mode=='multiply' or f.mode=='queen' then
         local r=f.p and st.refs[f.p]
         local fertility=r and r.fertility or 4
-        predicted[f.target]=(predicted[f.target] or 0)+(f.mode=='queen' and fertility or math.max(0,fertility-1))
+        local drone=f.d and st.refs[f.d]
+        local cost=(f.mode=='queen' or (drone and drone.inME==false)) and 0 or 1
+        predicted[f.target]=(predicted[f.target] or 0)+math.max(0,fertility-cost)
       end
     end
     stock=available
@@ -612,18 +738,18 @@ local function automate()
       return a.uid<b.uid
     end)
     local function idle(e) return e~=nil end
-    local function target(e) return samples[e.uid] and DRONE_TARGET or DRONE_TARGET+38 end
+    local function target(e) return (samples[e.uid] or not capabilities.sample) and DRONE_TARGET or DRONE_TARGET+38 end
     for _,e in ipairs(list) do
-      if e.queen>0 and (e.stockDrone+(predicted[e.uid] or 0)<target(e) or e.princess==0) then start('queen',e.uid,e.queenItem); return true end
+      if category=='queen' and capabilities.queen and e.queen>0 and (e.stockDrone+(predicted[e.uid] or 0)<target(e) or e.princess==0) then start('queen',e.uid,e.queenItem); return true end
     end
     for _,e in ipairs(list) do
-      if e.princess>0 and e.drone>0 and e.stockDrone+(predicted[e.uid] or 0)<target(e) then start('multiply',e.uid,e.princessItem,e.droneItem); return true end
+      if category=='breed' and capabilities.multiply and e.princess>0 and e.drone>0 and e.stockDrone+(predicted[e.uid] or 0)<target(e) then start('multiply',e.uid,e.princessItem,e.droneItem); return true end
     end
     for _,e in ipairs(list) do
-      if idle(e) and not samples[e.uid] and e.drone>DRONE_TARGET then start('sample',e.uid,nil,e.droneItem); return true end
+      if category=='sample' and capabilities.sample and idle(e) and not samples[e.uid] and e.drone>DRONE_TARGET then start('sample',e.uid,nil,e.droneItem); return true end
     end
     for _,e in ipairs(list) do
-      if not incoming[e.uid] and (e.drone<DRONE_TARGET or not samples[e.uid]) then
+      if category=='breed' and capabilities.restore and not incoming[e.uid] and (e.drone<DRONE_TARGET or not samples[e.uid]) then
         if e.princess==0 and e.queen==0 and e.drone>=1 then
           for _,base in ipairs(list) do
             if idle(base) and base.uid~=e.uid and base.princess>0 and (base.princess>1 or base.drone>=DRONE_TARGET) then
@@ -638,6 +764,7 @@ local function automate()
         end
       end
     end
+    if category~='mutate' or not capabilities.mutate then return false end
     local candidates={}
     local function resolve(value) return names[value] and value or aliases[value] end
     for _,recipe in pairs(recipes) do
@@ -650,7 +777,7 @@ local function automate()
         local extinct=not living or living.princess+living.drone+living.queen==0
         if a and b and result and not incoming[result] and (not samples[result] or extinct) and (not existing or existing.princess==0) then
           local function pair(p,d)
-            if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and (p.drone>0 or p.princess>1) then
+            if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and (p.princess>1 or p.drone>=DRONE_TARGET) then
               local conditions={}
               if type(recipe.specialConditions)=='table' then for _,v in pairs(recipe.specialConditions) do conditions[#conditions+1]=tostring(v) end
               elseif hasConditions(recipe) then conditions[1]=tostring(recipe.specialConditions) end
@@ -699,6 +826,7 @@ local function automate()
   end
   local function perform()
     cleanLease(); migrate()
+    for key,job in pairs(st.resources) do st.resources[key]=nil; save(); release(job.ref) end
     if not st.climateRouting then
       for _,f in pairs(st.flows) do
         for index,step in ipairs(f.steps) do
@@ -738,9 +866,14 @@ local function automate()
       end
     end
     for _ in pairs(st.refs) do capacity=capacity+1 end
-    local flowLimit=math.max(1,math.min(#groups.apiary,#groups.analyzer*6,math.floor((capacity-1)/2)))
+    local supplySlots=#groups.imprinter+2*#groups.sampler+#groups.mutatron
+    local flowLimit=math.max(0,math.min(options.queue>0 and options.queue or (#groups.apiary+#groups.mutatron+#groups.sampler),math.floor((capacity-supplySlots)/2)))
     print('Preparation capacity:',flowLimit,'flows; analyzer input slots: 6 per machine')
-    local nextRead=0; local stock,samples={},{}; local lastSummary=-60
+    local nextRead=0; local lastSummary=-60
+    local schedule={'queen','mutate','breed','breed','sample'}
+    local cursor=0
+    assert(flowLimit>0,'No usable job capacity; check modules and free OC database entries')
+    for _,f in pairs(st.flows) do if f.op then assert(machines[f.op.key],'Saved processor is missing; resolve existing work before changing modules') end end
     while true do
       availability={}
       serviceApiaries()
@@ -752,10 +885,15 @@ local function automate()
       table.sort(ids,function(a,b) return tonumber(a)<tonumber(b) end)
       for _,id in ipairs(ids) do currentID=id; flow=st.flows[id]; serviceFlow() end
       currentID=nil; flow=nil
-      if not st.needFresh then
+      do
         local count=0; for _ in pairs(st.flows) do count=count+1 end
         while count<flowLimit do
-          if not choose(stock,samples) then
+          local started=false
+          for _=1,#schedule do
+            cursor=cursor%#schedule+1
+            if choose(stock,samples,schedule[cursor]) then started=true; break end
+          end
+          if not started then
             if count==0 then warn('No currently available task; monitoring ME. Some species need parents or a wild source.') end
             break
           end

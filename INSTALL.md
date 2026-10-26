@@ -53,6 +53,8 @@ wget -fq https://raw.githubusercontent.com/CptFishHead/OpenBeekeeper/main/instal
 | `bees zones species <UID> HOT ARID` | Исправить справочник потребностей вида |
 | `bees plan` | Количества родителей, кандидаты для образцов и следующие мутации; только чтение |
 | `bees auto` | Общий автоцикл: анализатор, импринтер, пасеки, обычный мутатрон, пробоотбор |
+| `bees auto check` | Проверить количество механизмов, роли пасек и доступные ветки; без запросов и переносов |
+| `bees auto config` | Показать политику очередей; `batch 64`, `queue auto`, `mutations on/off`, `sampling on/off` |
 | `bees auto status` | Прочитать сохранённые задания без запуска механизмов |
 | `bees auto resume` | Продолжить сохранённый автоцикл |
 | `bees run` | Синоним auto; родители обязательно проходят анализатор и импринтер |

@@ -16,7 +16,7 @@ local serial=require('serialization'); local oldSerialize=serial.serialize
 local oldUnserialize=serial.unserialize
 serial.unserialize=function(text) return clone(oldUnserialize(text)) end
 serial.serialize=function(v)
- if v.schema=='AUTO1' or v.schema=='CLIMATE1' then serialNumber=serialNumber+1; local key='AUTO:'..serialNumber; serialValues[key]=clone(v); return key end
+ if v.schema=='AUTO1' or v.schema=='CLIMATE1' or v.schema=='AUTOOPTIONS1' then serialNumber=serialNumber+1; local key='AUTO:'..serialNumber; serialValues[key]=clone(v); return key end
  return oldSerialize(v)
 end
 local originalBee=beeStack
@@ -55,7 +55,7 @@ for n=5,8 do
     if failProcessorLoad and kind==failProcessorLoad then return 0 end
     assert(not processors[module][destination]); assert(count==bins[module][slot].size)
     processors[module][destination]=clone(bins[module][slot]); bins[module][slot]=nil
-    visits[#visits+1]={uid=processors[module][destination].individual and processors[module][destination].individual.ident,kind=kind,nbt=processors[module][destination]._nbt}
+    visits[#visits+1]={uid=processors[module][destination].individual and processors[module][destination].individual.ident,kind=kind,nbt=processors[module][destination]._nbt,count=count}
     return count
    end
    assert(from==0 and to==1)
@@ -123,7 +123,9 @@ for n=1,8 do
    source=stock[v.individual.ident..':'..k]
   else for _,x in pairs(stock) do if x.name==v.name and x.label==v.label then source=x; break end end end
   configurations[module][slot]=clone(v)
-  if source and source.size>=count and not noSupply then source.size=source.size-count; bins[module][slot]=v end
+  if source and source.size>0 and not noSupply then
+   v.size=math.min(count,source.size); source.size=source.size-v.size; bins[module][slot]=v
+  end
   return true
  end
 end
@@ -237,7 +239,7 @@ class AutomationTests(unittest.TestCase):
         self.assertIsNotNone(lua.globals().stock['sample:Bee Sample - Species: a'])
 
     def test_mutatron_side_result_is_saved_and_not_reported_as_target(self):
-        text, _, lua=self.execute("add('a','princess',6); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=30")
+        text, _, lua=self.execute("add('a','princess',6); add('a','drone',32); add('b','drone',33); stock.ga=sample('a'); stock.gb=sample('b'); mutationResult='side'; interruptAt=30")
         self.assertIn('MUTATION RESULT side wanted goal SIDE SPECIES SAVED', text)
         self.assertGreaterEqual(lua.globals().stock['side:drone'].size, 3)
         self.assertIsNone(lua.globals().stock['goal:drone'])
@@ -423,10 +425,39 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(sum(lua.globals().processors[5][slot] is not None for slot in range(3,9)),6)
 
     def test_several_princesses_of_same_species_can_fill_multiple_apiaries(self):
-        _, _, lua=self.execute("add('a','princess',12); add('a','drone',20); stock.ga=sample('a'); stall=true; interruptAt=120")
+        text, _, lua=self.execute("add('a','princess',16); add('a','drone',20); stall=true; interruptAt=180")
         jobs=[v for v in lua.globals().loaded.values() if v.slot==1]
-        self.assertEqual(len(jobs),4)
+        self.assertNotIn('AUTO PAUSED: openbeekeeper',text)
+        self.assertEqual(len(jobs),16)
         self.assertEqual({v.module for v in jobs},{1,2,3,4})
+        self.assertTrue(any(v.kind=='analyzer' and v.count>1 for v in lua.globals().visits.values()))
+
+    def test_optional_modules_and_preflight_configuration(self):
+        setup=r'''
+          local p='/home/.openbeekeeper-data/modules'
+          local rows={}
+          for line in stateFiles[p]:gmatch('[^\n]+') do
+            if not line:match('^interface t[78] ') and not line:match('^machine t[78] ') then rows[#rows+1]=line end
+          end
+          stateFiles[p]=table.concat(rows,'\n')..'\n'
+          devices.me.getItemsInNetwork=function() error('CHECK MUST NOT READ ME') end
+        '''
+        text, _, lua=self.execute(setup,'check')
+        self.assertIn('breeding=16 incubator=4',text)
+        self.assertIn('mutatrons=0 samplers=0',text)
+        self.assertIn('breeding=true mutations=false sampling=false',text)
+        self.assertEqual(lua.globals().configurationsMade,0)
+        lua.eval('function(src) return assert(load(src))("auto","config","batch","16") end')(runtime.SOURCE)
+        self.assertIn('AUTO CONFIG batch=16',self.invoke_auto(lua,action='config'))
+        lua.execute("devices.me.getItemsInNetwork=stockItems; add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); interruptAt=45")
+        self.invoke_auto(lua,action='resume')
+        self.assertGreaterEqual(lua.globals().stock['a:drone'].size,32)
+
+    def test_mutations_run_while_breeding_remains_queued(self):
+        text, _, lua=self.execute("add('a','princess',4); add('a','drone',32); add('b','drone',33); add('c','princess',80); add('c','drone',20); stock.ga=sample('a'); stock.gb=sample('b'); stall=true; interruptAt=100")
+        self.assertTrue(list(lua.globals().observedMutations.values()))
+        self.assertIn('FLOW multiply c',text)
+        self.assertIn('MUTATION RESULT',text)
 
     def test_reservations_do_not_duplicate_a_single_princess(self):
         _, _, lua=self.execute("add('a','princess',1); add('a','drone',20); stock.ga=sample('a'); stall=true; interruptAt=90")
