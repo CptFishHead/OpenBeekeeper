@@ -140,7 +140,6 @@ devices.t9={kind='transposer',
  transferItem=function(from,to,count,slot,destination)
   if from==1 then
    local v=assert(bins[9][slot]); assert(v.name:find('queen'),'INCUBATOR RECEIVED A MATING PARENT')
-   assert(v.individual.isAnalyzed,'QUEEN WAS NOT ANALYZED')
    apiaries[9][to][destination]=clone(v); bins[9][slot]=nil
    loaded[#loaded+1]={module=9,side=to,slot=destination,uid=v.individual.ident}; return count
   end
@@ -199,7 +198,7 @@ require('event').pull=function(seconds)
     if not hideSampleNBT then p[4].tag={species='rootBees',chromosome=success and 0 or 1,allele=success and uid or 'speed.fast'} end
     p[3]=nil; p[1].size=p[1].size-1; p[2].size=p[2].size-1
    elseif kind=='mutatron' and p[1] and p[2] and not p[3] then
-    assert(p[1].individual.isAnalyzed and p[2].individual.isAnalyzed,'UNANALYZED MUTATION')
+    -- Gendustry mutatron accepts parents without analysis or imprinting.
     local uid=mutationResult or (#observedMutations==0 and 'side' or 'goal')
     observedMutations[#observedMutations+1]=uid
     p[3]=beeStack(uid,'queen',1); p[1]=nil; p[2]=nil
@@ -238,22 +237,164 @@ class AutomationTests(unittest.TestCase):
         self.assertIsNotNone(lua.globals().stock['sample:Bee Sample - Speed: Fast'])
         self.assertIsNotNone(lua.globals().stock['sample:Bee Sample - Species: a'])
 
+    def test_mutatron_selects_live_princess_at_request_time_or_cancels_without_request(self):
+        for missing in (False,True):
+            with self.subTest(missing=missing):
+                setup=r'''
+                  add('a','princess',1); add('a','drone',16); add('b','drone',17)
+                  stock.ga=sample('a'); stock.gb=sample('b'); stallProcessor='mutatron'; interruptAt=50
+                  princessRequests=0; changedPrincess=false
+                  local store=devices.me.store
+                  devices.me.store=function(filter,address,slot,count)
+                    local raw=stateFiles['/home/.openbeekeeper-data/automation']
+                    local s=raw and require('serialization').unserialize(raw)
+                    if filter.name=='forestry:bee_princess_ge' and s then
+                      for _,f in pairs(s.flows) do
+                        if f.mode=='mutate' and f.steps[f.step]=='mate' and not changedPrincess then
+                          changedPrincess=true
+                          if missingPrincess then stock['a:princess'].size=0
+                          else stock['a:princess']._nbt='analyzed|captivity2'; stock['a:princess'].individual.isAnalyzed=true end
+                        end
+                      end
+                    end
+                    return store(filter,address,slot,count)
+                  end
+                  local request=devices.if8.setInterfaceConfiguration
+                  devices.if8.setInterfaceConfiguration=function(slot,address,index,count)
+                    if address and dbSlots[index].name=='forestry:bee_princess_ge' then
+                      princessRequests=princessRequests+1
+                      assert(stock['a:princess'].size>0,'REQUESTED ABSENT PRINCESS')
+                      assert(dbSlots[index]._nbt==stock['a:princess']._nbt,'REQUESTED STALE PRINCESS NBT')
+                    end
+                    return request(slot,address,index,count)
+                  end
+                '''
+                text, _, lua=self.execute('missingPrincess='+str(missing).lower()+';'+setup)
+                self.assertTrue(lua.globals().changedPrincess)
+                self.assertNotIn('REQUESTED ABSENT',text)
+                self.assertNotIn('REQUESTED STALE',text)
+                if missing:
+                    self.assertEqual(lua.globals().princessRequests,0)
+                    self.assertIsNone(lua.globals().processors[8][2])
+                    self.assertIn('mutatron request not configured',text)
+                else:
+                    self.assertEqual(lua.globals().princessRequests,1)
+                    self.assertEqual(lua.globals().processors[8][1]._nbt,'analyzed|captivity2')
+
+    def test_imprinter_preloads_free_input_and_keeps_output_ownership_in_order(self):
+        setup=r'''
+          add('a','drone',17); add('b','drone',17); blockImprintOutput=true; interruptAt=20
+          local move=devices.t6.transferItem
+          devices.t6.transferItem=function(from,to,count,slot,destination)
+            if from==0 and slot==4 and blockImprintOutput then return 0 end
+            return move(from,to,count,slot,destination)
+          end
+        '''
+        _, _, lua=self.execute(setup)
+        self.assertIsNotNone(lua.globals().processors[6][3])
+        self.assertIsNotNone(lua.globals().processors[6][4])
+        self.assertNotEqual(lua.globals().processors[6][3].individual.ident,lua.globals().processors[6][4].individual.ident)
+        lua.execute('blockImprintOutput=false; interruptAt=clock+60')
+        text=self.invoke_auto(lua,action='resume')
+        self.assertNotIn('Processor changed bee species',text)
+        self.assertEqual(set(lua.globals().sampled.values()),{'a','b'})
+
+    def test_mutatron_preloads_next_pair_while_previous_output_is_held(self):
+        setup=r'''
+          add('a','princess',4); add('a','drone',16); add('b','drone',40)
+          stock.ga=sample('a'); stock.gb=sample('b'); includeConditional=true; blockMutationOutput=true; interruptAt=15
+          local move=devices.t8.transferItem
+          devices.t8.transferItem=function(from,to,count,slot,destination)
+            if from==0 and slot==3 and blockMutationOutput then return 0 end
+            return move(from,to,count,slot,destination)
+          end
+        '''
+        text, _, lua=self.execute(setup)
+        self.assertIsNotNone(lua.globals().processors[8][1])
+        self.assertIsNotNone(lua.globals().processors[8][2])
+        self.assertIsNotNone(lua.globals().processors[8][3])
+        self.assertFalse(any(v.kind=='analyzer' for v in lua.globals().visits.values()))
+        lua.execute('blockMutationOutput=false; interruptAt=clock+40')
+        self.invoke_auto(lua,action='resume')
+        state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertGreaterEqual(state.mutations,2)
+
+    def test_apiary_preloads_next_drone_without_replacing_running_queen(self):
+        setup=r'''
+          local p='/home/.openbeekeeper-data/modules'; local rows={}
+          for line in stateFiles[p]:gmatch('[^\n]+') do
+            if not line:find('gendustry:industrial_apiary',1,true) or line=='machine t1 2 gendustry:industrial_apiary' then rows[#rows+1]=line end
+          end
+          stateFiles[p]=table.concat(rows,'\n')..'\n'
+          add('a','princess',2); add('a','drone',2); stock.ga=sample('a'); stall=true; interruptAt=80
+        '''
+        _, _, lua=self.execute(setup)
+        self.assertIn('queen',lua.globals().apiaries[1][2][1].name)
+        self.assertIsNotNone(lua.globals().apiaries[1][2][2])
+        self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),1)
+        self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==2]),2)
+        lua.execute('stall=false; interruptAt=clock+40')
+        self.invoke_auto(lua,action='resume')
+        self.assertGreaterEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),2)
+
+    def test_missing_mutatron_parent_returns_remaining_parent_and_replans(self):
+        setup=r'''
+          add('a','princess',1); add('a','drone',16); add('b','drone',17)
+          stock.ga=sample('a'); stock.gb=sample('b'); stallProcessor='mutatron'; interruptAt=45
+          local pull=require('event').pull
+          require('event').pull=function(seconds)
+            local result=pull(seconds)
+            if processors[8][1] and processors[8][2] and not removedParent then
+              processors[8][1]=nil; removedParent=true
+            end
+            return result
+          end
+        '''
+        text, _, lua=self.execute(setup)
+        self.assertTrue(lua.globals().removedParent)
+        self.assertIn('incomplete pair returned; replanning',text)
+        self.assertIsNone(lua.globals().processors[8][2])
+
+    def test_targeted_recovery_frees_empty_mutatron_without_discarding_other_jobs(self):
+        _, _, lua=self.execute("add('a','princess',1); add('a','drone',16); add('b','drone',17); stock.ga=sample('a'); stock.gb=sample('b'); stallProcessor='mutatron'; interruptAt=15")
+        old=lua.globals().stateFiles['/home/.openbeekeeper-data/automation']
+        before=len(list(lua.globals().lines.values()))
+        lua.eval('function(src) return assert(load(src))("auto","recover","mutatron","empty") end')(runtime.SOURCE)
+        refused='\n'.join(row.text for i,row in lua.globals().lines.items() if i>before)
+        self.assertIn('No empty mutatron jobs',refused)
+        self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/automation'],old)
+        lua.execute(r'''
+          processors[8][1]=nil; processors[8][2]=nil
+          local p='/home/.openbeekeeper-data/automation'; local ser=require('serialization')
+          local s=ser.unserialize(stateFiles[p]); s.flows['999']={mode='queen',target='a',steps={'queen'},step=1}
+          stateFiles[p]=ser.serialize(s)
+        ''')
+        before=len(list(lua.globals().lines.values()))
+        lua.eval('function(src) return assert(load(src))("auto","recover","mutatron","empty") end')(runtime.SOURCE)
+        text='\n'.join(row.text for i,row in lua.globals().lines.items() if i>before)
+        self.assertIn('RECOVERED EMPTY MUTATRON',text)
+        state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertIsNotNone(state.flows['999'])
+        self.assertEqual(len(list(state.flows.values())),1)
+        self.assertIsNotNone(lua.globals().stateFiles['/home/.openbeekeeper-data/automation-recover-1'])
+
     def test_mutation_runs_without_imprinter_and_without_imprinting_parents(self):
         setup=r'''
           local p='/home/.openbeekeeper-data/modules'; local rows={}
           for line in stateFiles[p]:gmatch('[^\n]+') do
-            if not line:match('^interface t6 ') and not line:match('^machine t6 ') then rows[#rows+1]=line end
+            if not line:match('^interface t[56] ') and not line:match('^machine t[56] ') then rows[#rows+1]=line end
           end
           stateFiles[p]=table.concat(rows,'\n')..'\n'
           add('a','princess',1); add('a','drone',16); add('b','drone',17)
-          stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=25; stallProcessor='mutatron'
+          stock.ga=sample('a'); stock.gb=sample('b'); add('c','queen',1); stock.gc=sample('c'); interruptAt=25; stallProcessor='mutatron'
         '''
         text, _, lua=self.execute(setup)
         self.assertIn('breeding=false mutations=true',text)
         parents=[v for v in lua.globals().visits.values() if v.kind=='mutatron']
         self.assertEqual(len(parents),2)
         self.assertTrue(all('imprinted' not in v.nbt for v in parents))
-        self.assertFalse(any(v.kind=='imprinter' for v in lua.globals().visits.values()))
+        self.assertFalse(any(v.kind in {'analyzer','imprinter'} for v in lua.globals().visits.values()))
+        self.assertTrue(any(v.uid=='c' and v.module==9 for v in lua.globals().loaded.values()))
 
     def test_mutatron_side_result_is_saved_and_not_reported_as_target(self):
         text, _, lua=self.execute("add('a','princess',6); add('a','drone',16); add('b','drone',17); stock.ga=sample('a'); stock.gb=sample('b'); mutationResult='side'; interruptAt=30")
@@ -490,7 +631,8 @@ class AutomationTests(unittest.TestCase):
         text, _, lua=self.execute("add('a','princess',16); add('a','drone',20); stall=true; interruptAt=180")
         jobs=[v for v in lua.globals().loaded.values() if v.slot==1]
         self.assertNotIn('AUTO PAUSED: openbeekeeper',text)
-        self.assertEqual(len(jobs),12)  # Enough predicted offspring for 16 reserve + 38 donors.
+        self.assertGreaterEqual(len(jobs),4)
+        self.assertLessEqual(len(jobs),12)  # Sampling may reduce the target while preparation is in flight.
         self.assertEqual({v.module for v in jobs},{1,2,3,4})
         self.assertTrue(any(v.kind=='analyzer' and v.count>1 for v in lua.globals().visits.values()))
 
@@ -552,13 +694,13 @@ class AutomationTests(unittest.TestCase):
         _, _, lua=self.execute("add('a','princess',1); add('a','drone',15); stock.ga=sample('a'); stall=true; interruptAt=90")
         self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),1)
 
-    def test_genome_unknown_to_climate_catalog_waits_after_queen_analysis(self):
+    def test_genome_unknown_to_climate_catalog_waits_without_queen_analysis(self):
         code="""
           add('unmapped','queen',1); interruptAt=35
         """
         text, _, lua=self.execute(code)
         self.assertIn('Unknown preferred climate for unmapped',text)
-        self.assertTrue(any(v.kind=='analyzer' and v.uid=='unmapped' for v in lua.globals().visits.values()))
+        self.assertFalse(any(v.kind=='analyzer' and v.uid=='unmapped' for v in lua.globals().visits.values()))
         self.assertEqual(len(list(lua.globals().loaded.values())),0)
 
     def test_incompatible_incubator_is_not_used(self):
@@ -608,15 +750,15 @@ class AutomationTests(unittest.TestCase):
         text='\n'.join(v.text for v in lua.globals().lines.values())
         self.assertIn('incubator plains NORMAL NORMAL t9:2',text)
 
-    def test_old_single_flow_queen_is_migrated_through_analyzer(self):
+    def test_old_single_flow_queen_is_migrated_without_analyzer(self):
         code="""
-          add('a','queen',1); interruptAt=40
+          add('a','queen',1); stall=true; interruptAt=40
           local old={schema='AUTO1',refs={},apiaries={},seq=0,cycles=0,samples=0,mutations=0,migrated=true,
             flow={mode='queen',target='a',step=1,steps={'queen'},pendingP=beeStack('a','queen',1)}}
           stateFiles['/home/.openbeekeeper-data/automation']=require('serialization').serialize(old)
         """
         text, _, lua=self.execute(code)
-        self.assertTrue(any(v.kind=='analyzer' and v.uid=='a' for v in lua.globals().visits.values()))
+        self.assertFalse(any(v.kind=='analyzer' and v.uid=='a' for v in lua.globals().visits.values()))
         self.assertTrue(any(v.module==9 for v in lua.globals().loaded.values()))
 
     def test_six_input_queue_resumes_without_duplicate_parents(self):

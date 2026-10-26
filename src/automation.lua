@@ -51,8 +51,12 @@ local function automate()
     if st.reset then print('RESET CLEANUP PENDING; use bees auto reset; archive: '..tostring(st.reset.archive)) end
     print(st.wait or "No resource wait recorded."); return true
   end
-  assert(args[2]==nil or args[2]=="resume" or args[2]=="reset" or args[2]=='check',"Use bees auto [resume/status/check/config/reset]")
-  assert(args[3]==nil or (args[2]=='reset' and args[3]=='empty'),'Use bees auto reset [empty]')
+  assert(args[2]==nil or args[2]=="resume" or args[2]=="reset" or args[2]=='check' or args[2]=='recover',"Use bees auto [resume/status/check/config/reset/recover]")
+  assert(args[3]==nil or (args[2]=='reset' and args[3]=='empty')
+    or (args[2]=='recover' and args[3]=='mutatron' and args[4]=='empty' and args[5]==nil),'Use bees auto reset [empty] or bees auto recover mutatron empty')
+  if args[2]=='recover' then
+    assert(args[3]=='mutatron' and args[4]=='empty','After cancelling internal work: bees auto recover mutatron empty')
+  end
   assert(not st.reset or args[2]=="reset","Reset cleanup is pending; use bees auto reset before resuming")
   assert(not fs.exists(BIND_PENDING) and not fs.exists(pendingPath),"Finish bind/interface recovery first")
   local function save()
@@ -260,11 +264,11 @@ local function automate()
     zones[zone.role]=(zones[zone.role] or 0)+1
   end
   local hasIncubation=zones.incubator+zones.breeding>0
-  local capabilities={queen=#groups.analyzer>0 and hasIncubation}
+  local capabilities={queen=hasIncubation}
   local prepare=#groups.analyzer>0 and #groups.imprinter>0
   capabilities.multiply=prepare and zones.breeding>0
   capabilities.restore=capabilities.multiply
-  capabilities.mutate=#groups.analyzer>0 and options.mutations and #groups.mutatron>0 and hasIncubation
+  capabilities.mutate=options.mutations and #groups.mutatron>0 and hasIncubation
   capabilities.sample=prepare and options.sampling and #groups.sampler>0
   print('MODULES apiaries='..#groups.apiary..' breeding='..zones.breeding..' incubator='..zones.incubator..' unassigned='..zones.unassigned..'; analyzers='..#groups.analyzer..' imprinters='..#groups.imprinter..' mutatrons='..#groups.mutatron..' samplers='..#groups.sampler..' databases='..#tools.databases)
   print('ENABLED breeding='..tostring(capabilities.multiply)..' mutations='..tostring(capabilities.mutate)..' sampling='..tostring(capabilities.sample)..'; analyzer batch='..options.batch)
@@ -378,6 +382,7 @@ local function automate()
     if ref.uid then local uid,kind=bee(v); return uid==ref.uid and kind==ref.kind end
     return v.name==ref.name and v.label==ref.label
   end
+  local materialize
   -- Per-interface requests are polled, never slept on. Database entries retain
   -- exact item identity; one owner serializes every use of a shared interface.
   local function deliver(m,id,destination,count,intention)
@@ -388,6 +393,14 @@ local function automate()
     if lease and lease.owner~=owner then return nil end
     if not lease then
       if not emptyBuffer(m.module) then return nil end
+      -- Mutation needs the species, not the previous captivity counter/genome.
+      -- A database entry copied after analysis can outlive that exact variant.
+      -- Resolve a positive live ME variant immediately before issuing a request.
+      if m.kind=='mutatron' and r.kind=='princess' then
+        if not materialize(id,true) then return false,'No live princess '..tostring(r.uid)..' in ME; mutatron request not configured' end
+      elseif not r.ready and not materialize(id) then
+        return false,'No live '..tostring(r.kind)..' '..tostring(r.uid)..' in ME; request not configured'
+      end
       st.leases[interface]={interface=interface,owner=owner,since=computer.uptime()}; save()
       assert(call(m.module.m.setInterfaceConfiguration,9,r.database,r.slot,count),"Interface request failed")
       lease=st.leases[interface]
@@ -439,8 +452,13 @@ local function automate()
     r.filter={name=v.name,label=v.label}; r.uid,r.kind=bee(v); r.name=v.name; r.label=v.label; r.available=v.size
     save(); return id
   end
-  local function materialize(id)
+  materialize=function(id,refresh)
     local r=st.refs[id]
+    if refresh then
+      local previous=call(db(r).get,r.slot)
+      r.filter={name=previous and previous.name or r.name,label=previous and previous.label or r.label}
+      r.ready=nil; r.analyzed=nil; r.imprinted=nil; save()
+    end
     if r.ready then return true end
     -- AE store() also enumerates zero-stock/craftable variants. A label-only
     -- lookup can therefore copy a phantom NBT template forever. Match a known
@@ -519,17 +537,34 @@ local function automate()
     return true
   end
   local availability,zoneCache={},{}
-  local function free(m)
-    if st.apiaries[m.key] then return false end
-    for id,f in pairs(st.flows) do if id~=currentID and f.op and f.op.key==m.key then return false end end
-    if m.kind=='apiary' and availability[m.key]~=nil then return availability[m.key] end
-    local lo,hi=outputSlots(m.kind)
-    for slot=lo,hi do if alive(item(m,slot)) then return false end end
-    if m.kind=='apiary' or m.kind=='mutatron' then
-      local result=not alive(item(m,1)) and not alive(item(m,2))
-      if m.kind=='apiary' then availability[m.key]=result end
-      return result
+  local function free(m,purpose)
+    local owned=false
+    for id,f in pairs(st.flows) do
+      if id~=currentID and f.op and f.op.key==m.key then
+        owned=true
+        if m.kind=='apiary' then return false end
+        for _,feed in ipairs(f.op.feeds) do if not feed.loaded then return false end end
+      end
     end
+    if m.kind=='apiary' then
+      local cacheKey=m.key..':'..tostring(purpose)
+      if availability[cacheKey]~=nil then return availability[cacheKey] end
+      local result
+      if st.apiaries[m.key] then
+        local parent=item(m,1); local _,kind=bee(parent or {})
+        result=purpose=='breeding' and not alive(item(m,2)) and (not alive(parent) or kind=='queen')
+      else
+        result=not alive(item(m,1)) and not alive(item(m,2))
+        if result then for slot=7,15 do if alive(item(m,slot)) then result=false end end end
+      end
+      availability[cacheKey]=result; return result
+    end
+    -- An older job owns its output, but empty inputs can hold the next job.
+    if not owned then
+      local lo,hi=outputSlots(m.kind)
+      for slot=lo,hi do if alive(item(m,slot)) then return false end end
+    end
+    if m.kind=='mutatron' then return not alive(item(m,1)) and not alive(item(m,2)) end
     if m.kind=='analyzer' then
       if alive(item(m,1)) then return false end
       for slot=3,8 do if alive(item(m,slot)) then return false end end
@@ -569,20 +604,25 @@ local function automate()
         if not duplicate and (owned or free(m)) then
           for slot=3,8 do if not reserved[slot] and not alive(item(m,slot)) then return m,slot end end
         end
-      elseif kind~='analyzer' and roleMatches and free(m) and emptyBuffer(m.module) then
+      elseif kind~='analyzer' and roleMatches and free(m,purpose) and emptyBuffer(m.module) then
         local climate=kind=='apiary' and zoneCache[m.key].value.score or 0
-        if not best or climate>score then best=m; score=climate end
+        local queued=st.apiaries[m.key] and 1 or 0
+        for id,other in pairs(st.flows) do
+          if id~=currentID and other.op and other.op.key==m.key then queued=queued+1 end
+        end
+        local rank=climate-queued*1000 -- Use idle hardware before preloading busy hardware.
+        if not best or rank>score then best=m; score=rank end
       end
     end
     return best,nil,kind=='apiary' and ('No free '..tostring(purpose)..' zone'..(requiredT and ' '..requiredT..'/'..requiredH or '')..'; inspect bees zones') or nil
   end
   local function returnSlot(m,slot)
     if st.leases[m.module.interface] then return false end
-    local v=item(m,slot); if not alive(v) then return true end
+    local v=item(m,slot); if not alive(v) then return true,0 end
     local moved=call(m.module.t.transferItem,m.side,m.module.source,v.size,slot)
     assert(type(moved)=="number" and moved>=0 and moved<=v.size,"Invalid bulk return")
     if moved>0 then adjust(v,moved); print("RETURN",m.kind,moved,v.label or v.name) end
-    return not alive(item(m,slot))
+    return not alive(item(m,slot)),moved
   end
   local function flowOwns(key)
     for _,f in pairs(st.flows) do if f.op and f.op.key==key then return true end end
@@ -617,7 +657,7 @@ local function automate()
         local _,kind=bee(item(m,2) or {})
         if kind=='drone' and not returnSlot(m,2) then empty=false end
       end
-      if not alive(item(m,1)) and not alive(item(m,2)) and empty then
+      if not alive(item(m,1)) and (not alive(item(m,2)) or flowOwns(key)) and empty then
         st.apiaries[key]=nil; st.cycles=st.cycles+1; save()
         print("APIARY COMPLETE",key,job.uid)
       end
@@ -648,7 +688,8 @@ local function automate()
     if not step then finishFlow(); return end
     -- Existing mutation queues may still contain imprint steps. Skip only work
     -- that has not been sent; finish an already armed/internal imprint safely.
-    if f.mode=='mutate' and step:match('^imprint') then
+    if (f.mode=='mutate' and (step:match('^imprint') or step:match('^analyze')))
+        or (f.mode=='queen' and step:match('^analyze')) then
       local started=f.op and (f.op.phase~='feeding' or f.op.capture or f.op.handed)
       if f.op then
         for _,feed in ipairs(f.op.feeds) do if feed.armed or feed.loaded then started=true end end
@@ -673,7 +714,7 @@ local function automate()
       local purpose=kind=='apiary' and (step=='queen' and 'incubator' or 'breeding') or nil
       if purpose=='breeding' then
         assert(st.refs[f.p].analyzed and st.refs[f.p].imprinted and st.refs[f.d].analyzed and st.refs[f.d].imprinted,'Both breeding parents must be analyzed and imprinted')
-      elseif purpose=='incubator' then assert(wanted and wanted.analyzed,'Queen must pass analyzer before climate routing') end
+      end
       local m,analysisSlot,reason=find(kind,wanted,purpose)
       if not m then warn(reason or "No empty "..kind); return end
       if not supplies(m) then return end
@@ -686,7 +727,8 @@ local function automate()
         local r=st.refs[id]
         feeds={{ref=id,slot=analysisSlot or 3,count=kind=='analyzer' and r.kind=='drone' and math.min(options.batch,r.available or 1) or 1}}
       end
-      f.op={key=m.key,feeds=feeds,phase='feeding',ticks=0}; f.wait=nil; waiting[currentID]=nil; st.wait=nil; save()
+      st.operationSeq=(st.operationSeq or 0)+1
+      f.op={key=m.key,feeds=feeds,phase='feeding',ticks=0,order=st.operationSeq}; f.wait=nil; waiting[currentID]=nil; st.wait=nil; save()
       if kind=='mutatron' and f.conditions and #f.conditions>0 then
         print('CONDITIONAL ATTEMPT',f.target,table.concat(f.conditions,'; '),'requirements are not verified by OC; server decides availability')
       end
@@ -707,6 +749,9 @@ local function automate()
       end
       for _,feed in ipairs(op.feeds) do
         if not feed.loaded then
+          if kind=='apiary' and st.apiaries[m.key] and feed.slot==1 and not feed.armed then
+            return -- The next drone may wait beside the current queen; its princess cannot.
+          end
           local r=st.refs[feed.ref]; local v=item(m,feed.slot)
           if alive(v) then
             local _,physicalKind=bee(v)
@@ -771,6 +816,34 @@ local function automate()
       end
       finishFlow(); return
     end
+    local older,newer=false,false
+    if kind~='analyzer' then
+      for id,other in pairs(st.flows) do
+        if id~=currentID and other.op and other.op.key==m.key then
+          if other.op.order<op.order then older=true else newer=true end
+        end
+      end
+    end
+    if kind=='mutatron' and not newer and not op.capture and not alive(item(m,3)) then
+      local princess,drone=item(m,1),item(m,2)
+      if alive(princess)~=alive(drone) then
+        local now=computer.uptime()
+        if not op.partialSince or now<op.partialSince then op.partialSince=now; save() end
+        if now-op.partialSince>=2 then
+          local slot=alive(princess) and 1 or 2
+          local ref=st.refs[slot==1 and f.p or f.d]
+          assert(matches(slot==1 and princess or drone,ref),'Unexpected remaining mutatron parent')
+          local cleared,moved=returnSlot(m,slot)
+          -- A successful extraction proves this pair was not consumed internally.
+          -- If the slot disappeared by itself, await the possible internal result.
+          if cleared and moved>0 then
+            print('RECOVER MUTATRON',m.key,'incomplete pair returned; replanning')
+            st.needFresh=true; finishFlow(); return
+          end
+        end
+      elseif op.partialSince then op.partialSince=nil; save() end
+    end
+    if older then return end -- Common outputs belong to the earliest loaded operation.
     local lo,hi=outputSlots(kind)
     if not op.capture then
       for slot=lo,hi do
@@ -841,7 +914,7 @@ local function automate()
       elseif kind=='mutatron' then
         st.mutations=st.mutations+1
         print("MUTATION RESULT",capture.uid,"wanted",f.target,capture.uid==f.target and 'MATCH' or 'SIDE SPECIES SAVED')
-        local oldDrone=f.d; f.d=nil; f.target=capture.uid; f.mode='queen'; f.steps={'analyzeP','queen'}; f.step=1; f.op=nil; save(); release(oldDrone)
+        local oldDrone=f.d; f.d=nil; f.target=capture.uid; f.mode='queen'; f.steps={'queen'}; f.step=1; f.op=nil; save(); release(oldDrone)
       elseif kind=='sampler' then
         if not capture.applied then
           st.samples=st.samples+1; capture.applied=true; save()
@@ -882,8 +955,8 @@ local function automate()
   end
   local function start(mode,target,p,d,conditions)
     local f={mode=mode,target=target,step=1,steps=mode=='sample' and {'analyzeD','imprintD','sample'}
-      or mode=='queen' and {'analyzeP','queen'}
-      or mode=='mutate' and {'analyzeP','analyzeD','mate'} or {'analyzeP','imprintP','analyzeD','imprintD','mate'}}
+      or mode=='queen' and {'queen'}
+      or mode=='mutate' and {'mate'} or {'analyzeP','imprintP','analyzeD','imprintD','mate'}}
     f.pendingP=p; f.pendingD=d; f.conditions=conditions; st.seq=st.seq+1; st.flows[tostring(st.seq)]=f; st.wait=nil; save(); print("FLOW",mode,target)
   end
   local function choose(stock,samples,category)
@@ -1010,6 +1083,19 @@ local function automate()
   end
   local function perform()
     cleanLease(); migrate()
+    st.operationSeq=st.operationSeq or 0
+    local ordered={}
+    for id,f in pairs(st.flows) do
+      if f.op then
+        if f.op.order then st.operationSeq=math.max(st.operationSeq,f.op.order)
+        else ordered[#ordered+1]=id end
+      end
+    end
+    table.sort(ordered,function(a,b) return tonumber(a)<tonumber(b) end)
+    for _,id in ipairs(ordered) do
+      st.operationSeq=st.operationSeq+1; st.flows[id].op.order=st.operationSeq
+    end
+    save()
     for key,job in pairs(st.resources) do st.resources[key]=nil; save(); release(job.ref) end
     if not st.climateRouting then
       for _,f in pairs(st.flows) do
@@ -1023,7 +1109,7 @@ local function automate()
         if f.mode=='queen' and f.steps[f.step]=='queen' then
           local loaded=false
           if f.op then for _,feed in ipairs(f.op.feeds) do if feed.loaded or feed.armed then loaded=true end end end
-          if not loaded then f.steps={'analyzeP','queen'}; f.step=1; f.op=nil end
+          if not loaded then f.steps={'queen'}; f.step=1; f.op=nil end
         end
       end
       st.climateRouting=true; save()
@@ -1040,7 +1126,7 @@ local function automate()
     end
     for key in pairs(st.apiaries) do assert(machines[key],'Owned apiary is missing') end
     save()
-    print('AUTO: breeding analyzer -> imprinter -> apiary; mutation analyzer -> mutatron; reserve 16; species gene chance 7.7%; all recipes allowed; server requirements remain enforced.')
+    print('AUTO: breeding analyzer -> imprinter -> apiary; mutation parents -> mutatron; queens -> climate apiary; reserve 16; species gene chance 7.7%; all recipes allowed; server requirements remain enforced.')
     print('Ctrl+C pauses. bees auto resumes. Fluids/power must be supplied to the machines.')
     local capacity=0
     for _,e in ipairs(tools.databases) do
@@ -1099,6 +1185,36 @@ local function automate()
       end
       tick()
     end
+  end
+  if args[2]=='recover' then
+    local candidates={}
+    local function emptyMutatron(m)
+      for slot=1,3 do if alive(item(m,slot)) then return false end end
+      return true
+    end
+    for id,f in pairs(st.flows) do
+      local m=f.op and machines[f.op.key]
+      if m and m.kind=='mutatron' and emptyMutatron(m) then candidates[#candidates+1]=id end
+    end
+    assert(#candidates>0,'No empty mutatron jobs to recover; occupied machines are preserved')
+    local number=1
+    while fs.exists(dir..'automation-recover-'..number) do number=number+1 end
+    local archive=dir..'automation-recover-'..number
+    local text=ser.serialize(st)
+    writeText(archive..'.new',text); assert(readText(archive..'.new')==text,'Recovery archive verification failed')
+    assert(fs.rename(archive..'.new',archive))
+    cleanLease()
+    for _,id in ipairs(candidates) do
+      currentID=id; flow=st.flows[id]
+      local m=machines[flow.op.key]
+      if emptyMutatron(m) then
+        print('RECOVERED EMPTY MUTATRON',m.key,'cancelled job '..id)
+        finishFlow()
+      else print('KEEP MUTATRON',m.key,'inventory changed; existing job retained') end
+    end
+    currentID=nil; flow=nil; st.needFresh=true; save()
+    print('Recovery archived at '..archive..'; other jobs preserved. Run bees auto.')
+    return true
   end
   local ok,err=pcall(perform)
   if not ok then
