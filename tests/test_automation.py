@@ -551,8 +551,9 @@ class AutomationTests(unittest.TestCase):
         setup = r'''
           add('a','drone',33); add('b','princess',1); add('b','drone',31)
           stock.gb=sample('b'); interruptAt=100
-          local original=devices.if5.setInterfaceConfiguration
-          devices.if5.setInterfaceConfiguration=function(slot,address,index,count)
+          -- One shared imprinter must remain available to b while a is missing.
+          local original=devices.if6.setInterfaceConfiguration
+          devices.if6.setInterfaceConfiguration=function(slot,address,index,count)
             local previous=noSupply
             if address and dbSlots[index].individual.ident=='a' and not supplyA then noSupply=true end
             local result=original(slot,address,index,count); noSupply=previous; return result
@@ -563,7 +564,7 @@ class AutomationTests(unittest.TestCase):
         self.assertGreater(lua.globals().cycles,0)
         self.assertGreaterEqual(lua.globals().stock['b:drone'].size,32)
         self.assertNotIn('a',list(lua.globals().sampled.values()))
-        self.assertIsNone(lua.globals().configurations[5][9])
+        self.assertIsNone(lua.globals().configurations[6][9])
         lua.execute('supplyA=true; interruptAt=clock+80')
         self.invoke_auto(lua,action='resume')
         self.assertEqual(list(lua.globals().sampled.values()).count('a'),1)

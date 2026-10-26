@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.10.4: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.10.5: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -1326,7 +1326,12 @@ local function automate()
           else
             local delivered,reason=deliver(m,feed.ref,feed.slot,1,feed)
             if not delivered then
-              if reason then deliveryRetry[currentID]=computer.uptime()+ME_INTERVAL end
+              if reason then
+                deliveryRetry[currentID]=computer.uptime()+ME_INTERVAL
+                local started=false
+                for _,input in ipairs(op.feeds) do if input.armed or input.loaded then started=true end end
+                if not started then f.op=nil; save() end
+              end
               warn(reason or ("Input transfer blocked at "..m.key)); return
             end
             deliveryRetry[currentID]=nil
@@ -1672,7 +1677,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.10.4 - read-only discovery")
+  print("OpenBeekeeper 0.10.5 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")

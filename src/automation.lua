@@ -454,7 +454,12 @@ local function automate()
           else
             local delivered,reason=deliver(m,feed.ref,feed.slot,1,feed)
             if not delivered then
-              if reason then deliveryRetry[currentID]=computer.uptime()+ME_INTERVAL end
+              if reason then
+                deliveryRetry[currentID]=computer.uptime()+ME_INTERVAL
+                local started=false
+                for _,input in ipairs(op.feeds) do if input.armed or input.loaded then started=true end end
+                if not started then f.op=nil; save() end
+              end
               warn(reason or ("Input transfer blocked at "..m.key)); return
             end
             deliveryRetry[currentID]=nil
