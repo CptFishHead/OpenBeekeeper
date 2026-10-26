@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.10.2: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.10.3: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -899,6 +899,7 @@ local function automate()
     print(st.wait or "No resource wait recorded."); return true
   end
   assert(args[2]==nil or args[2]=="resume" or args[2]=="reset","Use bees auto [resume/status/reset]")
+  assert(args[3]==nil or (args[2]=='reset' and args[3]=='empty'),'Use bees auto reset [empty]')
   assert(not st.reset or args[2]=="reset","Reset cleanup is pending; use bees auto reset before resuming")
   assert(not fs.exists(BIND_PENDING) and not fs.exists(pendingPath),"Finish bind/interface recovery first")
   local function save()
@@ -944,12 +945,13 @@ local function automate()
     end
   end
   if args[2]=='reset' then
+    local manuallyEmpty=args[3]=='empty' or (st.reset and st.reset.empty)
     local function refuse(reason)
       error('RESET REFUSED: '..reason..'; use bees auto status and resume existing work with bees auto. Empty machines alone do not prove internal work finished.')
     end
     if st.lease or st.resource then refuse('unresolved interface lease/resource transfer') end
-    if next(st.apiaries) then refuse('active apiary ownership remains in the journal') end
-    for id,f in pairs(st.flows) do
+    if not manuallyEmpty and next(st.apiaries) then refuse('active apiary ownership remains in the journal') end
+    for id,f in pairs(manuallyEmpty and {} or st.flows) do
       local op=f.op
       if op then
         if op.phase~='feeding' or op.capture or op.handed then refuse('flow '..id..' may be processing internally') end
@@ -1013,7 +1015,7 @@ local function automate()
       end
       local index=table.concat(rows,'\n')..'\n'
       writeText(archive..'.index',index); assert(readText(archive..'.index')==index,'Reset archive index verification failed')
-      st.reset={archive=archive}; save()
+      st.reset={archive=archive,empty=manuallyEmpty or nil}; save()
     end
     local reset=st.reset
     assert(type(reset.archive)=='string' and fs.exists(reset.archive..'.index'),'Reset archive missing; preserve journal')
@@ -1659,7 +1661,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.10.2 - read-only discovery")
+  print("OpenBeekeeper 0.10.3 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")

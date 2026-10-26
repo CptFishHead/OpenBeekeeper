@@ -548,6 +548,20 @@ class AutomationTests(unittest.TestCase):
         lua.execute("devices.me.getItemsInNetwork=function() return {} end; interruptAt=clock+3")
         self.assertNotIn('Exact item not delivered',self.invoke_auto(lua,action='resume'))
 
+    def test_explicit_empty_reset_discards_stale_work_but_checks_physical_slots(self):
+        _, _, lua = self.execute("add('a','drone',33); stallProcessor='analyzer'; interruptAt=3; dbSlots[81]={name='unrelated',size=1}")
+        def reset_empty():
+            before = len(list(lua.globals().lines.values()))
+            lua.eval('function(src) return assert(load(src))("auto","reset","empty") end')(runtime.SOURCE)
+            return '\n'.join(row.text for i,row in lua.globals().lines.items() if i>before)
+        self.assertIn('occupied analyzer', reset_empty())
+        lua.execute("processors[5]={}; local p='/home/.openbeekeeper-data/automation'; local ser=require('serialization'); local s=ser.unserialize(stateFiles[p]); s.apiaries['t1:2']={uid='a'}; stateFiles[p]=ser.serialize(s)")
+        self.assertIn('RESET REFUSED', self.invoke_auto(lua))
+        self.assertIn('AUTO RESET complete', reset_empty())
+        self.assertEqual(lua.globals().dbSlots[81].name, 'unrelated')
+        self.assertIsNotNone(lua.globals().stateFiles['/home/.openbeekeeper-data/automation-reset-1.main'])
+        self.assertIn('already complete', self.invoke_auto(lua))
+
     def test_reset_replans_from_current_base_bees_instead_of_old_me_snapshot(self):
         _, _, lua = self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
         self.assertIn('AUTO RESET complete',self.invoke_auto(lua))
