@@ -319,6 +319,30 @@ class AutomationTests(unittest.TestCase):
         state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
         self.assertGreaterEqual(state.mutations,2)
 
+    def test_mutatron_accounts_return_even_when_next_output_replaces_it_immediately(self):
+        setup=r'''
+          add('a','princess',4); add('a','drone',16); add('b','drone',40)
+          stock.ga=sample('a'); stock.gb=sample('b'); includeConditional=true; blockMutationOutput=true; interruptAt=15
+          local move=devices.t8.transferItem
+          devices.t8.transferItem=function(from,to,count,slot,destination)
+            if from==0 and slot==3 and blockMutationOutput then return 0 end
+            local moved=move(from,to,count,slot,destination)
+            local p=processors[8]
+            if from==0 and slot==3 and moved>0 and p[1] and p[2] then
+              p[3]=beeStack('goal','queen',1); p[1]=nil; p[2]=nil
+              immediateReplacement=true
+            end
+            return moved
+          end
+        '''
+        _, _, lua=self.execute(setup)
+        lua.execute('blockMutationOutput=false; interruptAt=clock+40')
+        text=self.invoke_auto(lua,action='resume')
+        self.assertTrue(lua.globals().immediateReplacement)
+        self.assertNotIn('Owned output changed',text)
+        state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertGreaterEqual(state.mutations,2)
+
     def test_apiary_preloads_next_drone_without_replacing_running_queen(self):
         setup=r'''
           local p='/home/.openbeekeeper-data/modules'; local rows={}

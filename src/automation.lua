@@ -219,11 +219,11 @@ local function automate()
       for slot=lo,hi do
         local v=call(m.module.t.getStackInSlot,m.side,slot)
         while alive(v) do
-          local moved=call(m.module.t.transferItem,m.side,m.module.source,v.size,slot)
+          local moved=call(m.module.t.transferItem,m.side,m.module.source,math.min(v.size,limit or v.size),slot)
           assert(type(moved)=='number' and moved>=0 and moved<=v.size,'Invalid reset output transfer')
           if moved==0 then
             waitBuffer(m.module)
-            moved=call(m.module.t.transferItem,m.side,m.module.source,v.size,slot)
+            moved=call(m.module.t.transferItem,m.side,m.module.source,math.min(v.size,limit or v.size),slot)
             assert(type(moved)=='number' and moved>0 and moved<=v.size,'Reset output transfer blocked at '..m.key..' slot '..slot..'; fix ME supply and repeat bees auto reset')
           end
           print('RESET RETURN',m.kind,moved,v.label or v.name)
@@ -616,10 +616,10 @@ local function automate()
     end
     return best,nil,kind=='apiary' and ('No free '..tostring(purpose)..' zone'..(requiredT and ' '..requiredT..'/'..requiredH or '')..'; inspect bees zones') or nil
   end
-  local function returnSlot(m,slot)
+  local function returnSlot(m,slot,limit)
     if st.leases[m.module.interface] then return false end
     local v=item(m,slot); if not alive(v) then return true,0 end
-    local moved=call(m.module.t.transferItem,m.side,m.module.source,v.size,slot)
+    local moved=call(m.module.t.transferItem,m.side,m.module.source,math.min(v.size,limit or v.size),slot)
     assert(type(moved)=="number" and moved>=0 and moved<=v.size,"Invalid bulk return")
     if moved>0 then adjust(v,moved); print("RETURN",m.kind,moved,v.label or v.name) end
     return not alive(item(m,slot)),moved
@@ -872,7 +872,7 @@ local function automate()
     if op.capture then
       local capture=op.capture
       local physical=item(m,capture.slot)
-      if alive(physical) then
+      if alive(physical) and not capture.returned then
         local uid,k=bee(physical)
         local same=capture.ref and uid==capture.uid and k==capture.kind
           or not capture.ref and physical.name==capture.name and physical.label==capture.label
@@ -888,11 +888,17 @@ local function automate()
                 end
               end
             end
-            capture.copied=true; save()
           end
-          if not returnSlot(m,capture.slot) then return end
+          -- Record non-bee results too. A transfer can expose the next queued
+          -- result immediately; slot emptiness is not an extraction receipt.
+          capture.remaining=capture.remaining or physical.size
+          capture.copied=true; save()
+          local _,moved=returnSlot(m,capture.slot,capture.remaining)
+          capture.remaining=capture.remaining-(moved or 0)
+          if capture.remaining>0 then save(); return end
+          capture.returned=true; save()
         else
-          assert(capture.copied,'Owned output changed before capture completed')
+          assert((capture.copied or not capture.ref) and not capture.remaining,'Owned output changed before capture completed')
         end
       end
       if capture.ref then
