@@ -27,7 +27,7 @@ devices.db.get=function(slot) return descriptor(dbSlots[slot]) end
 local function store(filter,address,slot,count)
  assert(address=='db' and count==1); stores=stores+1
  for _,v in pairs(stock) do
-  if v.size>0 and (not filter.name or v.name==filter.name) and (not filter.label or v.label==filter.label) then
+  if v.size>=0 and (not filter.name or v.name==filter.name) and (not filter.label or v.label==filter.label) and (not filter.size or v.size==filter.size) then
    dbSlots[slot]=clone(v); dbSlots[slot].size=1; return true
   end
  end
@@ -649,6 +649,28 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(lua.globals().dbSlots[2].name,'reused-after-reset')
         lua.execute("devices.me.getItemsInNetwork=function() return {} end; interruptAt=clock+3")
         self.assertNotIn('Exact item not delivered',self.invoke_auto(lua,action='resume'))
+
+    def test_zero_stock_craftable_princess_template_is_never_requested(self):
+        setup=r'''
+          add('a','princess',1); add('a','drone',31); stock.ga=sample('a'); interruptAt=60
+          phantom=beeStack('a','princess',0); phantom._nbt='old-captivity-template'
+          local original=devices.me.store
+          devices.me.store=function(filter,address,slot,count)
+            if filter.name==phantom.name and filter.label==phantom.label and not filter.size then
+              dbSlots[slot]=beeStack('a','princess',1); dbSlots[slot]._nbt=phantom._nbt; return true
+            end
+            return original(filter,address,slot,count)
+          end
+          local request=devices.if5.setInterfaceConfiguration
+          devices.if5.setInterfaceConfiguration=function(slot,address,index,count)
+            if address then assert(dbSlots[index]._nbt~=phantom._nbt,'PHANTOM PRINCESS REQUESTED') end
+            return request(slot,address,index,count)
+          end
+        '''
+        text, _, lua=self.execute(setup)
+        self.assertNotIn('PHANTOM PRINCESS REQUESTED',text)
+        self.assertIn('APIARY COMPLETE',text)
+        self.assertEqual(lua.globals().stock['a:drone'].size,34)
 
     def test_changed_captivity_nbt_reselects_live_drone_and_repeats_imprinting(self):
         setup=r'''

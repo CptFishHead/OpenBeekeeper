@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.11.5: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.11.6: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -1308,9 +1308,26 @@ local function automate()
   local function materialize(id)
     local r=st.refs[id]
     if r.ready then return true end
-    call(db(r).clear,r.slot)
-    call(me.proxy.store,r.filter,r.database,r.slot,1)
-    local v=call(db(r).get,r.slot)
+    -- AE store() also enumerates zero-stock/craftable variants. A label-only
+    -- lookup can therefore copy a phantom NBT template forever. Match a known
+    -- positive quantity from our ledger/snapshot; never request size-zero ghosts.
+    local e=stock[r.uid]
+    local current=e and e[r.kind..'Item']
+    local counts,seen={},{}
+    local function candidate(count)
+      if type(count)=='number' and count>0 and count%1==0 and not seen[count] then
+        counts[#counts+1]=count; seen[count]=true
+      end
+    end
+    if current and matches(current,r) then candidate(current.size) end
+    candidate(e and e[r.kind]); candidate(r.available); candidate(1)
+    local v
+    for _,count in ipairs(counts) do
+      call(db(r).clear,r.slot)
+      call(me.proxy.store,{name=r.filter.name,label=r.filter.label,size=count},r.database,r.slot,1)
+      v=call(db(r).get,r.slot)
+      if matches(v,r) then break end
+    end
     if not matches(v,r) then warn('ME needs '..tostring(r.uid)..' / '..tostring(r.kind)); return false end
     r.analyzed=type(v.individual)=='table' and v.individual.isAnalyzed==true
     r.ready=true; r.inME=true; save(); return true
