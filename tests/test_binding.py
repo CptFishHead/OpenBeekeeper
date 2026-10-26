@@ -86,6 +86,32 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(data.count('interface '), 9)
         self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/modules.bak'], 'OLD')
 
+    def test_unrelated_transposer_touching_two_interfaces_is_ignored(self):
+        setup = r'''
+          devices.junk={kind='transposer',
+            getInventoryName=function(side)
+              if side==0 or side==1 then return 'appliedenergistics2:interface' end
+              return nil,'no inventory'
+            end,
+            getStackInSlot=function() error('UNRELATED INVENTORY READ') end}
+        '''
+        text, _, lua=self.run_binding(setup)
+        self.assertIn('Saved 8 module bindings', text)
+        self.assertEqual(lua.globals().stores, 1)
+
+    def test_processing_transposer_touching_two_interfaces_is_rejected(self):
+        setup = r'''
+          local original=devices.t1.getInventoryName
+          devices.t1.getInventoryName=function(side)
+            if side==2 then return 'appliedenergistics2:interface' end
+            return original(side)
+          end
+        '''
+        text, _, lua=self.run_binding(setup)
+        self.assertIn('Several interfaces touch processing transposer t1', text)
+        self.assertEqual(lua.globals().stores, 0)
+        self.assertEqual(lua.globals().requests, 0)
+
     def test_missing_route_preserves_previous_map_and_cleans_all_probes(self):
         text, _, lua=self.run_binding("routes[8]=9; buffers[9]={}; stateFiles['/home/.openbeekeeper-data/modules']='OLD'")
         self.assertIn('Incomplete binding: bound=7, modules=8', text)

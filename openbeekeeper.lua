@@ -286,19 +286,24 @@ local function bindModules(recover)
   end
   local modules,interfaces={},{}
   for _,entry in ipairs(transposers) do
-    local module={entry=entry,machines={}}
+    local module={entry=entry,machines={},interfaceSides={}}
     for side=0,5 do
       local name=read(entry.proxy.getInventoryName,side)
       if name=="appliedenergistics2:interface" then
-        assert(module.side==nil,"Several interfaces touch transposer "..entry.address)
-        module.side=side
+        module.interfaceSides[#module.interfaceSides+1]=side
       elseif name=="gendustry:industrial_apiary" or name=="gendustry:mutatron"
           or name=="gendustry:mutatron_advanced" or name=="gendustry:imprinter"
           or name=="gendustry:sampler" or name=="forestry:analyzer" then
         module.machines[#module.machines+1]={side=side,name=name}
       end
     end
-    if module.side~=nil and #module.machines>0 then modules[#modules+1]=module end
+    if #module.machines>0 then
+      assert(#module.interfaceSides<=1,"Several interfaces touch processing transposer "..entry.address)
+      if #module.interfaceSides==1 then
+        module.side=module.interfaceSides[1]
+        modules[#modules+1]=module
+      end
+    end
   end
   for _,entry in ipairs(networks) do
     if entry.methods.setInterfaceConfiguration~=nil and entry.methods.getInterfaceConfiguration~=nil then
