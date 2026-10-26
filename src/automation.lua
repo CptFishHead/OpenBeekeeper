@@ -256,7 +256,10 @@ local function automate()
         end
       end
       if source then break end
-      assert(attempt<15,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. bees auto status shows saved work; for an intentional restart with empty machines use bees auto reset.")
+      if attempt==15 then
+        cleanLease()
+        return false,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. Retrying this job; other jobs continue."
+      end
       tick()
     end
     intention.armed=true; save() -- Recovery must never blindly replay a triggering input.
@@ -293,7 +296,8 @@ local function automate()
       release(id); st.resource=nil; save(); warn("ME needs "..label); return false
     end
     r.name=v.name; r.label=v.label; r.uid=nil; r.kind=nil; save()
-    deliver(m,id,slot,math.min(v.maxSize or 16,16),{})
+    local _,reason=deliver(m,id,slot,math.min(v.maxSize or 16,16),{})
+    if reason then warn(reason) end
     release(id); st.resource=nil; save()
     return alive(item(m,slot))
   end
@@ -405,8 +409,10 @@ local function automate()
     local r=assert(st.refs[id])
     assert(call(m.module.t.store,m.side,slot,r.database,r.slot),"Cannot copy exact output descriptor")
   end
+  local deliveryRetry={}
   local function serviceFlow()
     local f=flow; if not f then return end
+    if deliveryRetry[currentID] and computer.uptime()<deliveryRetry[currentID] then return end
     if f.pendingP then f.p=reference(f.pendingP); f.pendingP=nil; save() end
     if f.pendingD then f.d=reference(f.pendingD); f.pendingD=nil; save() end
     for _,id in ipairs({f.p or false,f.d or false}) do if id then materialize(id) end end
@@ -446,7 +452,12 @@ local function automate()
             -- The triggering item may be internal/already output. Never replay it.
             feed.loaded=true; save()
           else
-            if not deliver(m,feed.ref,feed.slot,1,feed) then warn("Input transfer blocked at "..m.key); return end
+            local delivered,reason=deliver(m,feed.ref,feed.slot,1,feed)
+            if not delivered then
+              if reason then deliveryRetry[currentID]=computer.uptime()+ME_INTERVAL end
+              warn(reason or ("Input transfer blocked at "..m.key)); return
+            end
+            deliveryRetry[currentID]=nil
             feed.loaded=true; save()
           end
         end

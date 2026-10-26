@@ -518,8 +518,7 @@ class AutomationTests(unittest.TestCase):
     def test_reset_stale_exact_request_archives_journals_and_preserves_configuration(self):
         text, _, lua = self.execute("add('a','drone',33); noSupply=true; dbSlots[1]={name='unrelated',size=1}; interruptAt=50")
         self.assertIn('Exact item not delivered within 15 seconds: a / drone', text)
-        self.assertIn('bees auto status', text)
-        self.assertIn('bees auto reset', text)
+        self.assertIn('Retrying this job; other jobs continue', text)
         lua.execute("""
           local p='/home/.openbeekeeper-data/automation'
           stateFiles[p..'.new']=stateFiles[p]
@@ -547,6 +546,27 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(lua.globals().dbSlots[2].name,'reused-after-reset')
         lua.execute("devices.me.getItemsInNetwork=function() return {} end; interruptAt=clock+3")
         self.assertNotIn('Exact item not delivered',self.invoke_auto(lua,action='resume'))
+
+    def test_missing_exact_bee_waits_without_stopping_other_jobs_and_resumes(self):
+        setup = r'''
+          add('a','drone',33); add('b','princess',1); add('b','drone',31)
+          stock.gb=sample('b'); interruptAt=100
+          local original=devices.if5.setInterfaceConfiguration
+          devices.if5.setInterfaceConfiguration=function(slot,address,index,count)
+            local previous=noSupply
+            if address and dbSlots[index].individual.ident=='a' and not supplyA then noSupply=true end
+            local result=original(slot,address,index,count); noSupply=previous; return result
+          end
+        '''
+        text, _, lua = self.execute(setup)
+        self.assertIn('Retrying this job; other jobs continue',text)
+        self.assertGreater(lua.globals().cycles,0)
+        self.assertGreaterEqual(lua.globals().stock['b:drone'].size,32)
+        self.assertNotIn('a',list(lua.globals().sampled.values()))
+        self.assertIsNone(lua.globals().configurations[5][9])
+        lua.execute('supplyA=true; interruptAt=clock+80')
+        self.invoke_auto(lua,action='resume')
+        self.assertEqual(list(lua.globals().sampled.values()).count('a'),1)
 
     def test_explicit_empty_reset_discards_stale_work_but_checks_physical_slots(self):
         _, _, lua = self.execute("add('a','drone',33); stallProcessor='analyzer'; interruptAt=3; dbSlots[81]={name='unrelated',size=1}")
