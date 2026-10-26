@@ -16,7 +16,7 @@ local serial=require('serialization'); local oldSerialize=serial.serialize
 local oldUnserialize=serial.unserialize
 serial.unserialize=function(text) return clone(oldUnserialize(text)) end
 serial.serialize=function(v)
- if v.schema=='AUTO1' or v.schema=='CLIMATE1' or v.schema=='AUTOOPTIONS1' then serialNumber=serialNumber+1; local key='AUTO:'..serialNumber; serialValues[key]=clone(v); return key end
+ if v.schema=='AUTO1' or v.schema=='CLIMATE1' or v.schema=='AUTOOPTIONS1' or v.schema=='AUTOINTERFACES1' then serialNumber=serialNumber+1; local key='AUTO:'..serialNumber; serialValues[key]=clone(v); return key end
  return oldSerialize(v)
 end
 local originalBee=beeStack
@@ -661,14 +661,10 @@ class AutomationTests(unittest.TestCase):
                 self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/automation'],old)
                 self.assertIsNone(lua.globals().stateFiles['/home/.openbeekeeper-data/automation-reset-1.index'])
 
-    def test_reset_refuses_occupied_machine_buffer_request_and_unresolved_ownership(self):
+    def test_reset_refuses_inputs_and_unresolved_machine_ownership(self):
         blockers = (
             "apiaries[1][2][1]=beeStack('b','queen',1)",
-            "bins[1][2]=beeStack('b','drone',1)",
-            "configurations[1][1]={name='unrelated',size=1}",
             "s.apiaries['t1:2']={uid='b'}",
-            "s.lease={interface='if1'}",
-            "s.resource='missing'",
             "for _,f in pairs(s.flows) do f.op.feeds[1].armed=true end",
             "for _,f in pairs(s.flows) do f.op.feeds[1].loaded=true end",
         )
@@ -679,6 +675,31 @@ class AutomationTests(unittest.TestCase):
                 before = lua.globals().stateFiles['/home/.openbeekeeper-data/automation']
                 self.assertIn('RESET REFUSED',self.invoke_auto(lua))
                 self.assertEqual(lua.globals().stateFiles['/home/.openbeekeeper-data/automation'],before)
+
+    def test_reset_clears_bound_interface_requests_and_stale_resource_jobs(self):
+        _, _, lua=self.execute("add('a','drone',33); noSupply=true; interruptAt=50")
+        lua.execute(r'''
+          local p='/home/.openbeekeeper-data/automation'; local ser=require('serialization')
+          local s=ser.unserialize(stateFiles[p]); local id=next(s.refs)
+          s.lease={interface='if5'}; s.leases={if6={interface='if6',owner=id}}
+          s.resource=id; s.resources={old={ref=id,intention={}}}
+          stateFiles[p]=ser.serialize(s)
+          for n=1,9 do configurations[n][3]={name='minecraft:diamond',size=1} end
+          configurations[5][9]=beeStack('a','drone',1)
+          bins[5][9]=beeStack('a','drone',1); stock['a:drone'].size=stock['a:drone'].size-1
+          devices.foreign={kind='me_interface',getInterfaceConfiguration=function() return {name='keep-me',size=1} end,
+            setInterfaceConfiguration=function() error('UNBOUND INTERFACE MUST NOT BE CLEARED') end}
+        ''')
+        self.assertIn('AUTO RESET complete',self.invoke_auto(lua))
+        for module in range(1,10):
+            self.assertEqual(len(list(lua.globals().configurations[module].items())),0)
+        self.assertIsNone(lua.globals().bins[5][9])
+        base='/home/.openbeekeeper-data/automation'
+        self.assertIsNotNone(lua.globals().stateFiles[base+'-reset-1.interfaces'])
+        lua.execute("resetState=require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+        self.assertIsNone(lua.globals().resetState.resource)
+        self.assertIsNone(lua.globals().resetState.lease)
+        self.assertIn('already complete',self.invoke_auto(lua))
 
     def test_reset_returns_only_outputs_and_retries_blocked_partial_transfers(self):
         _, _, lua=self.execute("add('a','drone',33); stallProcessor='analyzer'; interruptAt=3")

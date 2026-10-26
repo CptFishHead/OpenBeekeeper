@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.11.1: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.11.2: unattended bee genetics with exact database references.
 local component = require("component")
 local args = {...}
 local command = args[1] or "scan"
@@ -970,7 +970,6 @@ local function automate()
     local function refuse(reason)
       error('RESET REFUSED: '..reason..'; use bees auto status and resume existing work with bees auto. Empty machines alone do not prove internal work finished.')
     end
-    if st.lease or st.resource or next(st.leases or {}) or next(st.resources or {}) then refuse('unresolved interface lease/resource transfer') end
     if not manuallyEmpty and next(st.apiaries) then refuse('active apiary ownership remains in the journal') end
     for id,f in pairs(manuallyEmpty and {} or st.flows) do
       local op=f.op
@@ -992,11 +991,11 @@ local function automate()
         assert(event.pull(1)~='interrupted','Reset paused; repeat bees auto reset to continue')
       end
     end
+    local hasInterfaceWork=st.lease or st.resource or next(st.leases or {}) or next(st.resources or {})
     for _,module in pairs(modules) do
       for slot=1,9 do
-        if call(module.m.getInterfaceConfiguration,slot)~=nil then refuse('active interface request '..module.interface..' slot '..slot) end
+        if call(module.m.getInterfaceConfiguration,slot)~=nil or alive(call(module.t.getStackInSlot,module.source,slot)) then hasInterfaceWork=true end
       end
-      waitBuffer(module)
     end
     local hasOutputs=false
     local function resetOutputs(kind)
@@ -1029,7 +1028,7 @@ local function automate()
         if not matches then refuse('owned database slot changed externally: '..key..'; preserve its descriptor') end
       end
     end
-    if st.lastResetArchive and not st.reset and not hasOutputs and not next(st.refs) and not next(st.flows) then
+    if st.lastResetArchive and not st.reset and not hasOutputs and not hasInterfaceWork and not next(st.refs) and not next(st.flows) then
       -- Repair an interrupted final backup write without revisiting old refs.
       save()
       local text=assert(readText(path))
@@ -1056,6 +1055,27 @@ local function automate()
     end
     local reset=st.reset
     assert(type(reset.archive)=='string' and fs.exists(reset.archive..'.index'),'Reset archive missing; preserve journal')
+    local interfaceArchive=reset.archive..'.interfaces'
+    if not fs.exists(interfaceArchive) then
+      local saved={schema='AUTOINTERFACES1',interfaces={}}
+      for _,module in pairs(modules) do
+        local slots={}; saved.interfaces[module.interface]=slots
+        for slot=1,9 do slots[slot]=call(module.m.getInterfaceConfiguration,slot) end
+      end
+      local text=ser.serialize(saved)
+      writeText(interfaceArchive..'.new',text)
+      assert(readText(interfaceArchive..'.new')==text,'Interface archive verification failed')
+      assert(fs.rename(interfaceArchive..'.new',interfaceArchive))
+    end
+    parse(assert(readText(interfaceArchive)),'AUTOINTERFACES1')
+    for _,module in pairs(modules) do
+      for slot=1,9 do
+        if call(module.m.getInterfaceConfiguration,slot)~=nil then call(module.m.setInterfaceConfiguration,slot) end
+        assert(call(module.m.getInterfaceConfiguration,slot)==nil,'Cannot clear reset interface '..module.interface..' slot '..slot)
+      end
+    end
+    st.lease=nil; st.leases={}; st.resource=nil; st.resources={}; save()
+    for _,module in pairs(modules) do waitBuffer(module) end
     -- Output extraction is idempotent: archive the queue first, move only the
     -- actual remaining stacks, and clear descriptors only after ME accepts them.
     for _,m in pairs(machines) do
@@ -1851,7 +1871,7 @@ elseif command=="modules" then
   print(text or "No module bindings. Run bees bind.")
   return true
 elseif command=="scan" then
-  print("OpenBeekeeper 0.11.1 - read-only discovery")
+  print("OpenBeekeeper 0.11.2 - read-only discovery")
   print("Transposers: "..#transposers)
   local n=inspect(transposers,nil,true)
   print("Apiary adjacencies: "..n.." (duplicates possible; not a worker count)")
