@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.15.0: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.15.1: unattended bee genetics with exact database references.
 local component = require("component")
 local print=print -- Dashboard captures only this program, never global shell output.
 local dashboard
@@ -907,7 +907,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.15.0'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.15.1'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -1211,8 +1211,10 @@ local function automate()
   -- Species defaults from Forestry/Extra Bees 1.12; visible inherited genes
   -- are checked as well. No extra analyzer work is introduced by this policy.
   local effectRules={
-    {key='radiation',label='Radiation',default=false,match={'radiation','radioactive','unstable','Радиа','радиа','Радиоак','радиоак'},
-      forestry={'Vindictive','Vengeful','Avenging'},extra={'unstable','nuclear','radioactive','yellorium','cyanite','blutonium'}},
+    {key='radiation',label='Radiation (destroys blocks)',default=false,match={'radiation','radioactive','Радиа','радиа','Радиоак','радиоак'},
+      forestry={'Vindictive','Vengeful','Avenging'}},
+    {key='entityRadiation',label='Unstable (entity damage only)',match={'unstable','Нестабил','нестабил','Неустойчив','неустойчив','extrabees.effect.radioactive'},
+      extra={'unstable','nuclear','radioactive','yellorium','cyanite','blutonium'}},
     {key='acid',label='Acid (stone/dirt conversion)',match={'acid','Кислот','кислот'},extra={'corrosive','caustic','acidic'}},
     {key='ectoplasm',label='Ectoplasm (places blocks)',match={'ectoplasm','Эктоплаз','эктоплаз'},extra={'viscous','glutinous','sticky'}},
     {key='creepers',label='Creeper spawning',match={'spawn_creeper','spawncreeper','creepers','Криперы','криперы'},extra={'creeper'}},
@@ -1243,7 +1245,7 @@ local function automate()
         if lower=='creeper' or effect=='Крипер' or effect=='крипер' then found.explosions=true end
         for _,rule in ipairs(effectRules) do
           for _,pattern in ipairs(rule.match) do
-            if lower:find(pattern,1,true) then found[rule.key]=true; break end
+            if lower:find(pattern,1,true) and not (rule.key=='radiation' and lower:find('extrabees.effect.radioactive',1,true)) then found[rule.key]=true; break end
           end
         end
       end

@@ -216,7 +216,7 @@ class AutomationTests(unittest.TestCase):
 
     def test_radiation_species_and_visible_inherited_gene_are_blocked_without_analysis(self):
         cases=[("forestry.speciesVindictive",None),("forestry.speciesVengeful",None),
-               ("forestry.speciesAvenging",None),("extrabees.species.radioactive",None),
+               ("forestry.speciesAvenging",None),
                ("a","active"),("a","inactive")]
         for uid,side in cases:
             with self.subTest(uid=uid,side=side):
@@ -228,6 +228,22 @@ class AutomationTests(unittest.TestCase):
                 self.assertEqual(len(list(lua.globals().loaded.values())),0)
                 self.assertEqual(len(list(lua.globals().visits.values())),0)
                 self.assertEqual(lua.globals().stock[uid+':queen'].size,1)
+
+    def test_extra_bees_entity_radiation_is_allowed_with_destructive_radiation_blocked(self):
+        for species in ['unstable','nuclear','radioactive','yellorium','cyanite','blutonium']:
+            with self.subTest(species=species):
+                setup=r'''
+                  add(UID,'queen',1); stock[UID..':queen'].individual.active={effect='Unstable'}
+                  stock[UID..':queen'].individual.inactive={effect='extrabees.effect.radioactive'}
+                  stall=true; interruptAt=8
+                  local p='/home/.openbeekeeper-data/climate'; local c=require('serialization').unserialize(stateFiles[p])
+                  c.species[UID]={'NORMAL','NORMAL'}; stateFiles[p]=require('serialization').serialize(c)
+                  stateFiles['/home/.openbeekeeper-data/automation-options']=require('serialization').serialize({
+                    schema='AUTOOPTIONS1',batch=64,queue=0,mutations=true,sampling=true,effects={radiation=false}})
+                '''
+                _, _, lua=self.execute("UID='extrabees.species."+species+"';"+setup)
+                self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),1)
+                self.assertEqual(len(list(lua.globals().visits.values())),0)
 
     def test_radiation_mutation_target_is_not_planned(self):
         text, _, lua=self.execute(r'''
