@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.14.1: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.14.2: unattended bee genetics with exact database references.
 local component = require("component")
 local print=print -- Dashboard captures only this program, never global shell output.
 local dashboard
@@ -907,7 +907,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.1'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.2'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -1761,7 +1761,7 @@ local function automate()
     if m.kind=='analyzer' then return fluidReady(m) end
     if m.kind=='imprinter' then
       local template=item(m,1)
-      if not alive(template) or template.name~='gendustry:gene_template' then warn("Imprinter needs the user template without species/effect"); return false end
+      if not alive(template) or template.name~='gendustry:gene_template' then warn("Imprinter needs the user gene template (effect genes allowed; keep species unchanged)"); return false end
       return resource(m,2,'Genetics Labware')
     elseif m.kind=='sampler' then return resource(m,1,'Blank Gene Sample') and resource(m,2,'Genetics Labware')
     elseif m.kind=='mutatron' then return fluidReady(m) and resource(m,4,'Genetics Labware') end

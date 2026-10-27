@@ -592,7 +592,7 @@ local function automate()
     if m.kind=='analyzer' then return fluidReady(m) end
     if m.kind=='imprinter' then
       local template=item(m,1)
-      if not alive(template) or template.name~='gendustry:gene_template' then warn("Imprinter needs the user template without species/effect"); return false end
+      if not alive(template) or template.name~='gendustry:gene_template' then warn("Imprinter needs the user gene template (effect genes allowed; keep species unchanged)"); return false end
       return resource(m,2,'Genetics Labware')
     elseif m.kind=='sampler' then return resource(m,1,'Blank Gene Sample') and resource(m,2,'Genetics Labware')
     elseif m.kind=='mutatron' then return fluidReady(m) and resource(m,4,'Genetics Labware') end

@@ -16,7 +16,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.1'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.2'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
