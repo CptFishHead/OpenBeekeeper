@@ -19,6 +19,10 @@ class BeeCatalogTest(unittest.TestCase):
             self.assertIn(mutation["result"], species)
             self.assertTrue(set(mutation["parents"]).issubset(species))
 
+        boggy = [row for row in catalog["mutations"] if row["result"] == "extrabees.species.boggy"]
+        self.assertIn(["forestry.speciesBoggy", "extrabees.species.swamp"],
+                      [row["parents"] for row in boggy])
+
 
 if __name__ == "__main__":
     unittest.main()

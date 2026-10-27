@@ -85,7 +85,7 @@ def mutation_conditions(chain: str) -> list[str]:
             for name, args in re.findall(r"\.(restrict[A-Za-z]+|setIsSecret)\((.*?)\)", chain, re.S)]
 
 
-def mutation_rows(body: str, result_uid: str, uid_for) -> list[dict[str, object]]:
+def mutation_rows(body: str, result_uid: str, uid_for, parent_uid) -> list[dict[str, object]]:
     rows = []
     pattern = re.compile(r"this\.registerMutation\((.*?),\s*(.*?),\s*(\d+)\)(.*?);", re.S)
     for parent1, parent2, chance, chain in pattern.findall(body):
@@ -96,10 +96,10 @@ def mutation_rows(body: str, result_uid: str, uid_for) -> list[dict[str, object]
             choices = re.search(r"EnumSet\.of\((.*?)\)", body, re.S)
             if choices:
                 for choice in choices.group(1).split(","):
-                    rows.append({"result": result_uid, "parents": [uid_for(p1), uid_for(choice.strip())],
+                    rows.append({"result": result_uid, "parents": [parent_uid(parent1), uid_for(choice.strip())],
                                  "chance": int(chance), "conditions": mutation_conditions(chain)})
             continue
-        rows.append({"result": result_uid, "parents": [uid_for(p1), uid_for(p2)],
+        rows.append({"result": result_uid, "parents": [parent_uid(parent1), parent_uid(parent2)],
                      "chance": int(chance), "conditions": mutation_conditions(chain)})
     return rows
 
@@ -125,6 +125,12 @@ def parse_java_species(source: Path, branches_source: Path, mod: str, climate: d
             return ("forestry.species" + name.title().replace("_", "") if mod == "forestry"
                     else "extrabees.species." + name.lower())
         return "forestry.species" + name.title().replace("_", "")
+
+    def parent_uid(expression: str) -> str:
+        name = clean_expr(expression).split(".")[-1]
+        if mod == "extrabees" and "BeeDefinition." in expression:
+            return "forestry.species" + name.title().replace("_", "")
+        return uid_for(name)
 
     species, mutations = [], []
     for enum_name, block in species_blocks.items():
@@ -153,7 +159,7 @@ def parse_java_species(source: Path, branches_source: Path, mod: str, climate: d
                 "time": "any" if native["NEVER_SLEEPS"] == "true" else "day"},
             "nativeGenes": native, "effect": native["EFFECT"], "drops": drops(props),
         })
-        mutations.extend(mutation_rows(method_body(block, "registerMutations"), uid, uid_for))
+        mutations.extend(mutation_rows(method_body(block, "registerMutations"), uid, uid_for, parent_uid))
 
     if mod == "forestry":
         hive = ["FOREST", "MARSHY", "MEADOWS", "MODEST", "TROPICAL", "WINTRY"]
