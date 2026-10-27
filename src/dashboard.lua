@@ -16,7 +16,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.2'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.15.0'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -144,7 +144,7 @@ local function newDashboard()
     line(3,ui.stopRequested and ' [ Stopping... ]' or ' [ Stop ]  [ Check update ]  [ Update ]  [ Settings ]',0xFFE28A,0x5C4516)
     line(4,ui.stopRequested and 'Finishing the current transfer and clearing ME requests...' or (ui.notice or ui.updateText),0xD1BA74)
     if ui.page then
-      line(5,' [ Conditions ] [ Tasks ] [ Back ] | '..ui.page:upper(),0xFFE28A,0x3D3115)
+      line(5,' [ Conditions ] [ Tasks ] [ Effects ] [ Back ] | '..ui.page:upper(),0xFFE28A,0x3D3115)
       local settings=ui.settings or {options={},conditions={}}
       if ui.confirm then
         local selected=ui.confirm
@@ -152,6 +152,13 @@ local function newDashboard()
           label(selected.target),'Finishes current operation; planner keeps running.',
           '[ Confirm delete ]   [ Back ]'}
         actions={}; actions[4]={kind='confirm'}
+      elseif ui.page=='effects' then
+        rows={'Negative effects: allowed [x] / blocked [ ]:'}; actions={}
+        for _,rule in ipairs(settings.effects or {}) do
+          rows[#rows+1]=((settings.options.effects or {})[rule.key]~=false and '[x] ' or '[ ] ')..rule.label..' ('..rule.count..' species)'
+          actions[#rows]={kind='effect',key=rule.key}
+        end
+        rows[#rows+1]='Known species + visible genes; hidden hybrids may differ.'
       elseif ui.page=='conditions' then
         rows={}; actions={}
         local function checkbox(text,enabled,action)
@@ -187,7 +194,8 @@ local function newDashboard()
     for y=ui.logStart,h-3 do line(y,ui.logs[first+y-ui.logStart] or '',0xE4D9AA) end
     line(h-2,'Command | settings | help | Ctrl+C: stop | Other commands stop auto',0xD1BA74)
     line(h-1,'> '..unicode.sub(ui.input,math.max(1,unicode.len(ui.input)-w+4)),0xFFF3C4,0x3D3115)
-    line(h,ui.page=='conditions' and ' Checkboxes allow attempts; the server validates recipe conditions.'
+    line(h,ui.page=='effects' and ' Species restrictions persist. No additional bee analysis.'
+      or ui.page=='conditions' and ' Checkboxes allow attempts; the server validates recipe conditions.'
       or ui.page and ' Deleting a task keeps planner rules; jobs may be recreated.'
       or ' Stop/update preserve the queue; bees auto resumes.',0xD1BA74)
     ui.dirty=false; ui.lastDraw=computer.uptime()
@@ -226,6 +234,7 @@ local function newDashboard()
         ui.confirm=nil; ui.taskOffset=0
         if x<=16 then ui.page='conditions'
         elseif x<=26 then ui.page='tasks'
+        elseif x<=38 then ui.page='effects'
         else ui.page=nil end
       elseif y>=6 and y<=(ui.taskEnd or 9) then
         local action=(ui.rowActions or {})[ui.taskOffset+y-5]

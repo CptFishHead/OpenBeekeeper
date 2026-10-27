@@ -67,6 +67,32 @@ class DashboardTests(unittest.TestCase):
     def launch(self, setup):
         return runtime.RuntimeTests().run_script(automation.FULL+DISPLAY+setup,'ui')
 
+    def test_negative_effect_checkbox_allows_species_and_persists_without_extra_analysis(self):
+        setup=r'''
+          add('forestry.speciesVindictive','queen',1); stall=true; uiAction='stop'; uiAt=10
+          local p='/home/.openbeekeeper-data/climate'; local c=require('serialization').unserialize(stateFiles[p])
+          c.species['forestry.speciesVindictive']={'NORMAL','NORMAL'}; stateFiles[p]=require('serialization').serialize(c)
+          local pull=require('event').pull
+          require('event').pull=function(seconds)
+            local result=pull(seconds)
+            if clock>=1 and not settingsOpened then
+              settingsOpened=true; uiHandlers.touch('touch','screen',46,3)
+            elseif clock>=2 and not effectsOpened then
+              effectsOpened=true; uiHandlers.touch('touch','screen',30,5)
+            elseif clock>=3 and not radiationAllowed then
+              radiationAllowed=true; uiHandlers.touch('touch','screen',3,7)
+            end
+            return result
+          end
+        '''
+        _, _, lua=self.launch(setup)
+        options=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation-options'])")
+        self.assertTrue(options.effects.radiation)
+        self.assertTrue(any('[ ] Radiation' in row.text for row in lua.globals().uiHistory.values()))
+        self.assertTrue(any('[x] Radiation' in row.text for row in lua.globals().uiHistory.values()))
+        self.assertEqual(len(list(lua.globals().visits.values())),0)
+        self.assertEqual(len([v for v in lua.globals().loaded.values() if v.slot==1]),1)
+
     def test_settings_condition_checkbox_persists_without_stopping_executor(self):
         setup=r'''
           onlyConditional=true; uiAction='stop'; uiAt=8

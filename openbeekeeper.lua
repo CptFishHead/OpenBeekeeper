@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.14.2: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.15.0: unattended bee genetics with exact database references.
 local component = require("component")
 local print=print -- Dashboard captures only this program, never global shell output.
 local dashboard
@@ -907,7 +907,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.2'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.15.0'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -1035,7 +1035,7 @@ local function newDashboard()
     line(3,ui.stopRequested and ' [ Stopping... ]' or ' [ Stop ]  [ Check update ]  [ Update ]  [ Settings ]',0xFFE28A,0x5C4516)
     line(4,ui.stopRequested and 'Finishing the current transfer and clearing ME requests...' or (ui.notice or ui.updateText),0xD1BA74)
     if ui.page then
-      line(5,' [ Conditions ] [ Tasks ] [ Back ] | '..ui.page:upper(),0xFFE28A,0x3D3115)
+      line(5,' [ Conditions ] [ Tasks ] [ Effects ] [ Back ] | '..ui.page:upper(),0xFFE28A,0x3D3115)
       local settings=ui.settings or {options={},conditions={}}
       if ui.confirm then
         local selected=ui.confirm
@@ -1043,6 +1043,13 @@ local function newDashboard()
           label(selected.target),'Finishes current operation; planner keeps running.',
           '[ Confirm delete ]   [ Back ]'}
         actions={}; actions[4]={kind='confirm'}
+      elseif ui.page=='effects' then
+        rows={'Negative effects: allowed [x] / blocked [ ]:'}; actions={}
+        for _,rule in ipairs(settings.effects or {}) do
+          rows[#rows+1]=((settings.options.effects or {})[rule.key]~=false and '[x] ' or '[ ] ')..rule.label..' ('..rule.count..' species)'
+          actions[#rows]={kind='effect',key=rule.key}
+        end
+        rows[#rows+1]='Known species + visible genes; hidden hybrids may differ.'
       elseif ui.page=='conditions' then
         rows={}; actions={}
         local function checkbox(text,enabled,action)
@@ -1078,7 +1085,8 @@ local function newDashboard()
     for y=ui.logStart,h-3 do line(y,ui.logs[first+y-ui.logStart] or '',0xE4D9AA) end
     line(h-2,'Command | settings | help | Ctrl+C: stop | Other commands stop auto',0xD1BA74)
     line(h-1,'> '..unicode.sub(ui.input,math.max(1,unicode.len(ui.input)-w+4)),0xFFF3C4,0x3D3115)
-    line(h,ui.page=='conditions' and ' Checkboxes allow attempts; the server validates recipe conditions.'
+    line(h,ui.page=='effects' and ' Species restrictions persist. No additional bee analysis.'
+      or ui.page=='conditions' and ' Checkboxes allow attempts; the server validates recipe conditions.'
       or ui.page and ' Deleting a task keeps planner rules; jobs may be recreated.'
       or ' Stop/update preserve the queue; bees auto resumes.',0xD1BA74)
     ui.dirty=false; ui.lastDraw=computer.uptime()
@@ -1117,6 +1125,7 @@ local function newDashboard()
         ui.confirm=nil; ui.taskOffset=0
         if x<=16 then ui.page='conditions'
         elseif x<=26 then ui.page='tasks'
+        elseif x<=38 then ui.page='effects'
         else ui.page=nil end
       elseif y>=6 and y<=(ui.taskEnd or 9) then
         local action=(ui.rowActions or {})[ui.taskOffset+y-5]
@@ -1199,6 +1208,48 @@ local function automate()
     assert(ok and type(value)=="table" and value.schema==schema,"Invalid "..schema.." journal; preserve it")
     return value
   end
+  -- Species defaults from Forestry/Extra Bees 1.12; visible inherited genes
+  -- are checked as well. No extra analyzer work is introduced by this policy.
+  local effectRules={
+    {key='radiation',label='Radiation',default=false,match={'radiation','radioactive','unstable','Радиа','радиа','Радиоак','радиоак'},
+      forestry={'Vindictive','Vengeful','Avenging'},extra={'unstable','nuclear','radioactive','yellorium','cyanite','blutonium'}},
+    {key='acid',label='Acid (stone/dirt conversion)',match={'acid','Кислот','кислот'},extra={'corrosive','caustic','acidic'}},
+    {key='ectoplasm',label='Ectoplasm (places blocks)',match={'ectoplasm','Эктоплаз','эктоплаз'},extra={'viscous','glutinous','sticky'}},
+    {key='creepers',label='Creeper spawning',match={'spawn_creeper','spawncreeper','creepers','Криперы','криперы'},extra={'creeper'}},
+    {key='lightning',label='Lightning',match={'lightning','Молни','молни'},extra={'excited','energetic'}},
+    {key='meteor',label='Meteor / fireballs',match={'meteor','Метеор','метеор'},extra={'tempered','volcanic'}},
+    {key='explosions',label='Explosion effect (Forestry)',match={'effectcreeper','Взрыв','взрыв'},forestry={'Austere'},extra={'hazardous'}},
+    {key='ignition',label='Ignition (burns entities)',match={'ignition','flammable','Воспламен','воспламен'},forestry={'Demonic'}},
+    {key='freezing',label='Freezing (water to ice)',match={'glacial','freezing','Замораж','замораж'},forestry={'Wintry','Icy','Glacial'}},
+    {key='aggressive',label='Aggressive (entity damage)',match={'aggress','Агресс','агресс'},forestry={'Sinister','Fiendish'},extra={'basalt','glowstone'}},
+    {key='poison',label='Poison',match={'poison','miasmic','Отрав','отрав'},forestry={'Tropical','Exotic'},extra={'malicious','infectious','virulent'}}
+  }
+  local effectByKey,speciesEffects={},{}
+  for _,rule in ipairs(effectRules) do
+    effectByKey[rule.key]=rule; rule.count=0
+    for _,species in ipairs(rule.forestry or {}) do speciesEffects['forestry.species'..species]=rule.key; rule.count=rule.count+1 end
+    for _,species in ipairs(rule.extra or {}) do speciesEffects['extrabees.species.'..species]=rule.key; rule.count=rule.count+1 end
+  end
+  local function beeEffects(v,uid)
+    local found={}; uid=bee(v or {}) or uid
+    if speciesEffects[uid] then found[speciesEffects[uid]]=true end
+    local individual=type(v)=='table' and v.individual
+    for _,side in ipairs({'active','inactive'}) do
+      local genome=type(individual)=='table' and individual[side]
+      local effect=type(genome)=='table' and genome.effect
+      if type(effect)=='table' then effect=effect.uid or effect.name or effect.label end
+      if type(effect)=='string' then
+        local lower=effect:lower()
+        if lower=='creeper' or effect=='Крипер' or effect=='крипер' then found.explosions=true end
+        for _,rule in ipairs(effectRules) do
+          for _,pattern in ipairs(rule.match) do
+            if lower:find(pattern,1,true) then found[rule.key]=true; break end
+          end
+        end
+      end
+    end
+    return found
+  end
   local options=readText(optionsPath..'.new') or readText(optionsPath)
   options=options and parse(options,'AUTOOPTIONS1') or {schema='AUTOOPTIONS1',batch=64,queue=0,mutations=true,sampling=true}
   assert(type(options.batch)=='number' and options.batch%1==0 and options.batch>=1 and options.batch<=64
@@ -1217,6 +1268,16 @@ local function automate()
     if fs.exists(optionsPath) then assert(fs.remove(optionsPath)) end
     assert(fs.rename(optionsPath..'.new',optionsPath))
   end
+  options.effects=options.effects or {}
+  assert(type(options.effects)=='table','Invalid effect policy')
+  for key,value in pairs(options.effects) do assert(type(key)=='string' and type(value)=='boolean','Invalid effect policy entry') end
+  for _,rule in ipairs(effectRules) do
+    if options.effects[rule.key]==nil then options.effects[rule.key]=rule.default~=false end
+  end
+  local function blockedEffects(found)
+    for _,rule in ipairs(effectRules) do if found[rule.key] and not options.effects[rule.key] then return rule.key end end
+  end
+  local function blockedBee(v,uid) return blockedEffects(beeEffects(v,uid)) end
   if args[2]=='config' then
     local key,value=args[3],args[4]
     if key then
@@ -1517,7 +1578,7 @@ local function automate()
   local conditionList={}; for text in pairs(conditionSet) do conditionList[#conditionList+1]=text end
   table.sort(conditionList)
   if dashboard then
-    dashboard.settings={options=options,conditions=conditionList}
+    dashboard.settings={options=options,conditions=conditionList,effects=effectRules}
     dashboard.actions=dashboard.actions or {}
   end
   local stock,samples={},{}
@@ -1620,6 +1681,12 @@ local function automate()
     local r=assert(st.refs[id],"Missing owned bee reference")
     local interface=m.module.interface
     local owner=id..':'..m.key..':'..destination
+    local denied=blockedBee(nil,r.uid) or blockedEffects(r.effects or {})
+    if denied then
+      local existing=st.leases[interface]
+      if existing and existing.owner==owner then cleanLease(interface) end
+      return false,'EFFECT BLOCKED '..denied..' '..tostring(r.uid)..'; bee kept in ME'
+    end
     local lease=st.leases[interface]
     if lease and lease.owner~=owner then return nil end
     if not lease then
@@ -1649,6 +1716,12 @@ local function automate()
       if computer.uptime()-lease.since<15 then return nil end
       cleanLease(interface)
       return false,"Exact item not delivered within 15 seconds: "..tostring(r.uid or r.name).." / "..tostring(r.kind or r.label).."; check ME stock, exact NBT and interface supply. Request cancelled; other jobs continue."
+    end
+    local staged=call(m.module.t.getStackInSlot,m.module.source,source)
+    local effect=blockedBee(staged)
+    if effect then
+      r.effects=beeEffects(staged,r.uid); save(); cleanLease(interface)
+      return false,'EFFECT BLOCKED '..effect..' '..tostring(r.uid)..'; bee kept in ME'
     end
     if m.kind=='analyzer' and count>1 and not intention.batchPeers then
       intention.batchPeers={}
@@ -1713,6 +1786,7 @@ local function automate()
     end
     if not matches(v,r) then warn('ME needs '..tostring(r.uid)..' / '..tostring(r.kind)); return false end
     r.analyzed=type(v.individual)=='table' and v.individual.isAnalyzed==true
+    r.effects=beeEffects(v,r.uid)
     r.ready=true; r.inME=true; save(); return true
   end
   local resourceRetry={}
@@ -1883,6 +1957,12 @@ local function automate()
     for key,job in pairs(st.apiaries) do
       local m=assert(machines[key],"Saved apiary is missing")
       local empty=true
+      local queen=item(m,1)
+      local effect=blockedBee(queen,job.uid)
+      if effect then
+        job.cancelRequested=true; save()
+        warn('EFFECT BLOCKED '..effect..' '..tostring(job.uid)..'; returning apiary bees to ME')
+      end
       if job.cancelRequested then
         -- The queued next drone belongs to its flow, not to this apiary cycle.
         if not returnSlot(m,1) then empty=false end
@@ -1911,6 +1991,16 @@ local function automate()
     for _,feed in ipairs(f.op.feeds) do if feed.armed or feed.loaded then return true end end
     return false
   end
+  local function blockedFlow(f)
+    local effect=blockedBee(nil,f.target)
+    if effect then return effect end
+    for _,role in ipairs({'p','d'}) do
+      local r=f[role] and st.refs[f[role]]
+      local pending=f[role=='p' and 'pendingP' or 'pendingD']
+      effect=r and (blockedBee(nil,r.uid) or blockedEffects(r.effects or {})) or blockedBee(pending)
+      if effect then return effect end
+    end
+  end
   local function processControls()
     local actions=dashboard and dashboard.actions or {}
     if dashboard then dashboard.actions={} end
@@ -1919,6 +2009,9 @@ local function automate()
       if action.kind=='condition' and conditionSet[action.key] then
         options.conditions[action.key]=options.conditions[action.key]==false
         saveOptions(); print('CONDITION',options.conditions[action.key] and 'ALLOW' or 'BLOCK',action.key)
+      elseif action.kind=='effect' and effectByKey[action.key] then
+        options.effects[action.key]=not options.effects[action.key]
+        saveOptions(); print('EFFECT POLICY',action.key,options.effects[action.key] and 'ALLOW' or 'BLOCK')
       elseif action.kind=='option' and (action.key=='mutations' or action.key=='sampling') then
         options[action.key]=not options[action.key]; saveOptions()
         capabilities.mutate=options.mutations and #groups.mutatron>0 and hasIncubation
@@ -1940,7 +2033,7 @@ local function automate()
     -- Policy edits also apply to already queued mutations; an internal result
     -- must still be collected before ownership can be released.
     for _,f in pairs(st.flows) do
-      if f.mode=='mutate' and (not options.mutations or not conditionsAllowed(f.conditions))
+      if blockedFlow(f) or f.mode=='mutate' and (not options.mutations or not conditionsAllowed(f.conditions))
           or f.mode=='sample' and not options.sampling then
         if not f.cancelRequested then f.cancelRequested=true; changed=true end
       end
@@ -1955,6 +2048,7 @@ local function automate()
   local function serviceFlow()
     if dashboard then dashboard.pump(); assert(not dashboard.stopRequested,'Stopped from dashboard') end
     local f=flow; if not f then return end
+    if blockedFlow(f) then f.cancelRequested=true; save() end
     if f.cancelRequested and not operationStarted(f) then
       if f.op then
         for interface,lease in pairs(st.leases) do
@@ -2200,7 +2294,7 @@ local function automate()
         local r=st.refs[capture.ref]; local v=call(db(r).get,r.slot)
         local uid,k=bee(v or {})
         assert(uid==capture.uid and k==capture.kind,"Captured output descriptor missing")
-        r.uid=uid; r.kind=k; r.filter=nil; r.ready=true; r.inME=true; save()
+        r.uid=uid; r.kind=k; r.filter=nil; r.ready=true; r.inME=true; r.effects=beeEffects(v,uid); save()
         local active=type(v.individual)=='table' and v.individual.active
         local fertility=type(active)=='table' and tonumber(active.fertility)
         if fertility and fertility>=1 and fertility<=64 then r.fertility=fertility; save() end
@@ -2235,32 +2329,7 @@ local function automate()
     end
   end
   local function collectStock(items)
-    local recipeConditionCache={}
-  local function recipeConditions(recipe)
-    if recipeConditionCache[recipe] then return recipeConditionCache[recipe] end
-    local list={}
-    if type(recipe.specialConditions)=='table' then
-      for _,value in pairs(recipe.specialConditions) do list[#list+1]=tostring(value) end
-    elseif hasConditions(recipe) then list[1]=tostring(recipe.specialConditions) end
-    table.sort(list); recipeConditionCache[recipe]=list; return list
-  end
-  local function conditionsAllowed(list)
-    for _,text in ipairs(list or {}) do if options.conditions[text]==false then return false end end
-    return true
-  end
-  local conditionSet={}
-  for _,recipe in pairs(recipes) do
-    if type(recipe)=='table' then for _,text in ipairs(recipeConditions(recipe)) do conditionSet[text]=true end end
-  end
-  for text in pairs(options.conditions) do conditionSet[text]=true end
-  for _,f in pairs(st.flows) do for _,text in ipairs(f.conditions or {}) do conditionSet[text]=true end end
-  local conditionList={}; for text in pairs(conditionSet) do conditionList[#conditionList+1]=text end
-  table.sort(conditionList)
-  if dashboard then
-    dashboard.settings={options=options,conditions=conditionList}
-    dashboard.actions=dashboard.actions or {}
-  end
-  local stock,samples={},{}
+    local stock,samples={},{}
     for _,v in pairs(items) do
       if alive(v) then
         local uid,k=bee(v)
@@ -2327,28 +2396,29 @@ local function automate()
       return a.uid<b.uid
     end)
     local function idle(e) return e~=nil end
+    local function allowed(v) return v~=nil and not blockedBee(v) end
     local function target(e) return (samples[e.uid] or not capabilities.sample) and DRONE_TARGET or DRONE_TARGET+38 end
     for _,e in ipairs(list) do
-      if category=='queen' and capabilities.queen and e.queen>0 and (e.stockDrone+(predicted[e.uid] or 0)<target(e) or e.princess==0) then start('queen',e.uid,e.queenItem); return true end
+      if category=='queen' and capabilities.queen and e.queen>0 and allowed(e.queenItem) and (e.stockDrone+(predicted[e.uid] or 0)<target(e) or e.princess==0) then start('queen',e.uid,e.queenItem); return true end
     end
     for _,e in ipairs(list) do
-      if category=='breed' and capabilities.multiply and e.princess>0 and e.drone>0 and e.stockDrone+(predicted[e.uid] or 0)<target(e) then start('multiply',e.uid,e.princessItem,e.droneItem); return true end
+      if category=='breed' and capabilities.multiply and e.princess>0 and e.drone>0 and allowed(e.princessItem) and allowed(e.droneItem) and e.stockDrone+(predicted[e.uid] or 0)<target(e) then start('multiply',e.uid,e.princessItem,e.droneItem); return true end
     end
     for _,e in ipairs(list) do
-      if category=='sample' and capabilities.sample and idle(e) and not samples[e.uid] and e.drone>DRONE_TARGET then start('sample',e.uid,nil,e.droneItem); return true end
+      if category=='sample' and capabilities.sample and idle(e) and allowed(e.droneItem) and not samples[e.uid] and e.drone>DRONE_TARGET then start('sample',e.uid,nil,e.droneItem); return true end
     end
     for _,e in ipairs(list) do
-      if category=='breed' and capabilities.restore and not incoming[e.uid] and (e.drone<DRONE_TARGET or not samples[e.uid]) then
+      if category=='breed' and capabilities.restore and not incoming[e.uid] and (e.princess==0 or allowed(e.princessItem)) and (e.drone==0 or allowed(e.droneItem)) and (e.drone<DRONE_TARGET or not samples[e.uid]) then
         if e.princess==0 and e.queen==0 and e.drone>=1 then
           for _,base in ipairs(list) do
-            if idle(base) and base.uid~=e.uid and base.princess>0 and (base.princess>1 or base.drone>=DRONE_TARGET) then
+            if idle(base) and base.uid~=e.uid and base.princess>0 and allowed(base.princessItem) and (base.princess>1 or base.drone>=DRONE_TARGET) then
               if e.drone==1 then print('RESTORE USING LAST DRONE',e.uid,'loss risk accepted; actual offspring will be inspected') end
               start('restore',e.uid,base.princessItem,e.droneItem); return true
             end
           end
         elseif e.princess>0 and e.drone==0 then
           for _,donor in ipairs(list) do
-            if idle(donor) and donor.uid~=e.uid and donor.drone>=2 then start('restore',e.uid,e.princessItem,donor.droneItem); return true end
+            if idle(donor) and donor.uid~=e.uid and donor.drone>=2 and allowed(donor.droneItem) then start('restore',e.uid,e.princessItem,donor.droneItem); return true end
           end
         end
       end
@@ -2364,9 +2434,9 @@ local function automate()
         -- extinct lines, but let existing bees and in-flight jobs restore them.
         local living=result and observed[result]
         local extinct=not living or living.princess+living.drone+living.queen==0
-        if a and b and result and conditionsAllowed(recipeConditions(recipe)) and not incoming[result] and (not samples[result] or extinct) and (not existing or existing.princess==0) then
+        if a and b and result and not blockedBee(nil,result) and conditionsAllowed(recipeConditions(recipe)) and not incoming[result] and (not samples[result] or extinct) and (not existing or existing.princess==0) then
           local function pair(p,d)
-            if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and (p.princess>1 or p.drone>=DRONE_TARGET) then
+            if idle(p) and idle(d) and p.princess>0 and d.drone>=2 and allowed(p.princessItem) and allowed(d.droneItem) and (p.princess>1 or p.drone>=DRONE_TARGET) then
               local conditions=recipeConditions(recipe)
               candidates[#candidates+1]={p=p,d=d,result=result,conditions=conditions}
             end
@@ -2412,6 +2482,10 @@ local function automate()
   end
   local function perform()
     cleanLease(); migrate()
+    for _,r in pairs(st.refs) do
+      if r.ready then r.effects=beeEffects(call(db(r).get,r.slot),r.uid) end
+    end
+    save()
     st.operationSeq=st.operationSeq or 0
     local ordered={}
     for id,f in pairs(st.flows) do

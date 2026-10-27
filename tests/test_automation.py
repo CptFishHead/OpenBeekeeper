@@ -214,6 +214,62 @@ class AutomationTests(unittest.TestCase):
     def execute(self, setup='', *args):
         return runtime.RuntimeTests().run_script(FULL+setup, 'auto', *args)
 
+    def test_radiation_species_and_visible_inherited_gene_are_blocked_without_analysis(self):
+        cases=[("forestry.speciesVindictive",None),("forestry.speciesVengeful",None),
+               ("forestry.speciesAvenging",None),("extrabees.species.radioactive",None),
+               ("a","active"),("a","inactive")]
+        for uid,side in cases:
+            with self.subTest(uid=uid,side=side):
+                setup="add('"+uid+"','queen',1); interruptAt=12;"
+                if side:
+                    setup+="stock['a:queen'].individual.isAnalyzed=true; stock['a:queen'].individual."+side+"={effect='Radiation'};"
+                text, _, lua=self.execute(setup)
+                self.assertNotIn('FLOW queen',text)
+                self.assertEqual(len(list(lua.globals().loaded.values())),0)
+                self.assertEqual(len(list(lua.globals().visits.values())),0)
+                self.assertEqual(lua.globals().stock[uid+':queen'].size,1)
+
+    def test_radiation_mutation_target_is_not_planned(self):
+        text, _, lua=self.execute(r'''
+          add('a','princess',1); add('a','drone',16); add('b','drone',17)
+          stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=12
+          devices.catalogue.listAllSpecies=function() return {
+            {uid='a',name='a'},{uid='b',name='b'},
+            {uid='forestry.speciesVindictive',name='Vindictive'}} end
+          devices.catalogue.getBeeBreedingData=function() return {{
+            allele1='a',allele2='b',result='forestry.speciesVindictive',chance=10}} end
+        ''')
+        self.assertNotIn('FLOW mutate',text)
+        self.assertEqual(len(list(lua.globals().observedMutations.values())),0)
+
+    def test_unexpected_radioactive_mutation_result_stays_in_me(self):
+        text, _, lua=self.execute(r'''
+          add('a','princess',1); add('a','drone',16); add('b','drone',17)
+          stock.ga=sample('a'); stock.gb=sample('b'); interruptAt=16
+          mutationResult='forestry.speciesVindictive'
+        ''')
+        self.assertEqual(lua.globals().stock['forestry.speciesVindictive:queen'].size,1)
+        self.assertEqual(len(list(lua.globals().loaded.values())),0)
+        self.assertFalse(any(v.kind=='analyzer' for v in lua.globals().visits.values()))
+
+    def test_existing_radioactive_apiary_is_evacuated_to_me(self):
+        text, _, lua=self.execute(r'''
+          apiaries[9][2][1]=beeStack('forestry.speciesVindictive','queen',1)
+          stall=true; interruptAt=8
+          local move=devices.t9.transferItem
+          devices.t9.transferItem=function(from,to,count,slot,destination)
+            if from~=1 and slot==1 then
+              local v=apiaries[9][from][slot]; assert(v and count==v.size)
+              add(v.individual.ident,'queen',count); apiaries[9][from][slot]=nil; return count
+            end
+            return move(from,to,count,slot,destination)
+          end
+        ''')
+        self.assertIn('EFFECT BLOCKED radiation',text)
+        self.assertIsNone(lua.globals().apiaries[9][2][1])
+        self.assertEqual(lua.globals().stock['forestry.speciesVindictive:queen'].size,1)
+        self.assertEqual(len(list(lua.globals().loaded.values())),0)
+
     def test_disconnected_interface_keeps_lease_but_other_requests_are_cleaned_and_resume_works(self):
         for raises in [False,True]:
             with self.subTest(proxy_raises=raises):
