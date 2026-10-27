@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.14.0: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.14.1: unattended bee genetics with exact database references.
 local component = require("component")
 local print=print -- Dashboard captures only this program, never global shell output.
 local dashboard
@@ -907,7 +907,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.0'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.14.1'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
@@ -1176,12 +1176,23 @@ local function automate()
   local dir="/home/.openbeekeeper-data/"
   local path=dir.."automation"
   local optionsPath=dir..'automation-options'
+  local methodOwners={}
+  for _,entries in ipairs({transposers,networks,catalogues,tools.databases}) do
+    for _,entry in ipairs(entries) do
+      for name in pairs(entry.methods or {}) do
+        local method=entry.proxy[name]
+        if method~=nil then methodOwners[method]=entry.address..'.'..name end
+      end
+    end
+  end
   local function call(method,...)
     if dashboard then
       dashboard.pump()
       if dashboard.stopRequested and not dashboard.critical and not dashboard.cleaning then error('Stopped from dashboard') end
     end
-    local value,err=read(method,...); assert(not err,err); return value
+    local value,err=read(method,...)
+    assert(not err,(methodOwners[method] or 'Component call')..': '..tostring(err))
+    return value
   end
   local function parse(text,schema)
     local ok,value=pcall(ser.unserialize,text)
@@ -1542,7 +1553,11 @@ local function automate()
     assert(event.pull(1)~="interrupted","Paused by Ctrl+C; bees auto resumes")
     assert(not dashboard or not dashboard.stopRequested,'Stopped from dashboard')
   end
-  local function db(ref) return component.proxy(ref.database) end
+  local function db(ref)
+    local proxy,err=read(component.proxy,ref.database)
+    assert(proxy,'OC database unavailable: '..ref.database..'; '..tostring(err or 'no such component'))
+    return proxy
+  end
   local function allocate()
     local owned={}
     for _,r in pairs(st.refs) do owned[r.database..":"..r.slot]=true end
@@ -1573,12 +1588,21 @@ local function automate()
     end
     local keys={}
     for key in pairs(st.leases) do if not interface or key==interface then keys[#keys+1]=key end end
+    table.sort(keys)
+    local failures={}
     for _,key in ipairs(keys) do
-      local p=component.proxy(key)
-      call(p.setInterfaceConfiguration,9)
-      assert(call(p.getInterfaceConfiguration,9)==nil,"Could not clear automation request 9")
-      st.leases[key]=nil; save()
+      -- A missing interface must not prevent cleanup on all other modules.
+      -- Keep its lease and descriptor until its request is actually cleared.
+      local ok,err=pcall(function()
+        local proxy,reason=read(component.proxy,key)
+        assert(proxy,'interface unavailable: '..tostring(reason or 'no such component'))
+        call(proxy.setInterfaceConfiguration,9)
+        assert(call(proxy.getInterfaceConfiguration,9)==nil,'request 9 remains configured')
+        st.leases[key]=nil; save()
+      end)
+      if not ok then failures[#failures+1]=key..': '..tostring(err) end
     end
+    assert(#failures==0,'ME request cleanup pending: '..table.concat(failures,'; '))
   end
   local function emptyBuffer(module)
     for slot=1,9 do if alive(call(module.t.getStackInSlot,module.source,slot)) then return false end end
@@ -2523,6 +2547,26 @@ local function automate()
     print('Recovery archived at '..archive..'; other jobs preserved. Run bees auto.')
     return true
   end
+  local function reportDisconnected()
+    local ok,seen=pcall(function()
+      local found={}; for address in component.list() do found[address]=true end; return found
+    end)
+    if not ok then print('Component diagnostics unavailable: '..tostring(seen)); return end
+    local required={[me.address]='ME network'}
+    for _,module in pairs(modules) do
+      required[module.address]='transposer'; required[module.interface]='ME interface'
+    end
+    for _,r in pairs(st.refs) do required[r.database]='OC database' end
+    local missing={}
+    for address,kind in pairs(required) do
+      if not seen[address] then missing[#missing+1]=kind..' '..address end
+    end
+    table.sort(missing)
+    for _,text in ipairs(missing) do print('OFFLINE',text) end
+    if #missing>0 then
+      print('Restore component connections/power and loaded chunks, then bees auto. Keep the queue and bindings.')
+    end
+  end
   local ok,err=pcall(perform)
   if not ok then
     if dashboard then dashboard.cleaning=true; dashboard.critical=nil end
@@ -2530,6 +2574,7 @@ local function automate()
     if dashboard then dashboard.safeToRun=cleaned end
     print('AUTO PAUSED: '..tostring(err))
     if not cleaned then print('Request cleanup pending: '..tostring(cleanupError)) end
+    reportDisconnected()
     print('Loaded inputs and exact references preserved. Fix the error, then bees auto.')
     return false
   end

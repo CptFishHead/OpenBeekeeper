@@ -214,6 +214,59 @@ class AutomationTests(unittest.TestCase):
     def execute(self, setup='', *args):
         return runtime.RuntimeTests().run_script(FULL+setup, 'auto', *args)
 
+    def test_disconnected_interface_keeps_lease_but_other_requests_are_cleaned_and_resume_works(self):
+        for raises in [False,True]:
+            with self.subTest(proxy_raises=raises):
+                setup=r'''
+                  add('a','drone',17); noSupply=true; interruptAt=10
+                  local serial=require('serialization'); local serialize=serial.serialize
+                  serial.serialize=function(v)
+                    if v.schema=='AUTO1' then liveState=v end
+                    return serialize(v)
+                  end
+                  local component=require('component'); local proxy=component.proxy
+                  component.proxy=function(address)
+                    if address=='if6' and disconnected and missingProxyRaises then error('no such component') end
+                    return proxy(address)
+                  end
+                  local get=devices.t5.getStackInSlot
+                  devices.t5.getStackInSlot=function(...)
+                    if disconnected then error('no such component') end
+                    return get(...)
+                  end
+                  interface6=devices.if6
+                  clear8=devices.if8.setInterfaceConfiguration
+                  devices.if8.setInterfaceConfiguration=function(slot,address,...)
+                    if disconnected and not address then error('no such component') end
+                    return clear8(slot,address,...)
+                  end
+                  local pull=require('event').pull
+                  require('event').pull=function(seconds)
+                    local result=pull(seconds)
+                    if clock>=3 and not detached then
+                      detached=true; disconnected=true; devices.if6=nil
+                      for _,key in ipairs({'if6','if7','if8'}) do liveState.leases[key]={owner='test'} end
+                      configurations[7][9]={name='test',size=1}
+                    end
+                    return result
+                  end
+                '''
+                text, _, lua=self.execute('missingProxyRaises='+str(raises).lower()+';'+setup)
+                self.assertIn('t5.getStackInSlot',text)
+                self.assertIn('OFFLINE ME interface if6',text)
+                self.assertNotIn('attempt to index a nil',text)
+                state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+                self.assertIsNotNone(state.leases['if6'])
+                self.assertIsNotNone(state.leases['if8'])
+                self.assertIsNone(state.leases['if7'])
+                self.assertIsNone(lua.globals().configurations[7][9])
+                self.assertGreater(len(list(state.refs.values())),0)
+                lua.execute("disconnected=false; devices.if6=interface6; noSupply=false; interruptAt=clock+60")
+                text=self.invoke_auto(lua,action='resume')
+                state=lua.eval("require('serialization').unserialize(stateFiles['/home/.openbeekeeper-data/automation'])")
+                self.assertEqual(len(list(state.leases.values())),0)
+                self.assertEqual(list(lua.globals().sampled.values()),['a'])
+
     def test_every_recipe_condition_must_be_enabled(self):
         for blocked in ['date','biome',None]:
             with self.subTest(blocked=blocked):
