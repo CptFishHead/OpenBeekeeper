@@ -648,9 +648,36 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(list(lua.globals().visits.values()), [])
         self.assertFalse(list(lua.globals().configurations[5].items()))
 
+    def test_imprinter_routes_output_to_matching_job_after_reservation_order_changes(self):
+        _, _, lua=self.execute(r'''
+          add('a','drone',17); add('b','drone',17); holdOutput=true; interruptAt=18
+          local move=devices.t6.transferItem
+          devices.t6.transferItem=function(from,to,count,slot,destination)
+            if from==0 and slot==4 and holdOutput then return 0 end
+            return move(from,to,count,slot,destination)
+          end
+        ''')
+        lua.execute(r'''
+          local path='/home/.openbeekeeper-data/automation'
+          local s=require('serialization').unserialize(stateFiles[path]); local current,nextJob
+          local output=processors[6][4].individual.ident
+          for _,f in pairs(s.flows) do
+            if f.op and f.op.key=='t6:0' then
+              if s.refs[f.d].uid==output then current=f else nextJob=f end
+            end
+          end
+          assert(current and nextJob)
+          current.op.order=100; current.op.capture=nil; nextJob.op.order=1; s.operationSeq=100
+          stateFiles[path]=require('serialization').serialize(s)
+          holdOutput=false; interruptAt=clock+60
+        ''')
+        text=self.invoke_auto(lua,action='resume')
+        self.assertNotIn('Processor changed bee species/type',text)
+        self.assertEqual(set(lua.globals().sampled.values()),{'a','b'})
+
     def test_changed_species_from_imprinter_is_quarantined(self):
         text, _, lua=self.execute("add('a','princess',1); add('a','drone',15); stock.ga=sample('a'); changeSpecies=true; interruptAt=40")
-        self.assertIn('Processor changed bee species/type', text)
+        self.assertIn('UNMATCHED IMPRINTER OUTPUT', text)
         self.assertEqual(len(list(lua.globals().loaded.values())), 0)
         self.assertIsNotNone(lua.globals().processors[6][4])
 

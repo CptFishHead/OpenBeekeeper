@@ -1056,7 +1056,34 @@ local function automate()
         end
       elseif op.partialSince then op.partialSince=nil; save() end
     end
-    if older then return end -- Common outputs belong to the earliest loaded operation.
+    if kind=='imprinter' and op.capture then older=false end
+    if kind=='imprinter' and not op.capture then
+      local output=item(m,4)
+      if alive(output) and output.name~='gendustry:waste' then
+        local uid,k=bee(output)
+        local owner,order
+        for id,other in pairs(st.flows) do
+          local operation=other.op
+          if operation and operation.key==m.key then
+            if operation.capture and not operation.capture.returned then owner=id; break end
+            if operation.phase=='working' then
+              local step=other.steps[other.step]
+              local ref=st.refs[step:sub(-1)=='P' and other.p or other.d]
+              if ref and uid==ref.uid and k==ref.kind and (not order or operation.order<order) then
+                owner=id; order=operation.order
+              end
+            end
+          end
+        end
+        if not owner then
+          warn('UNMATCHED IMPRINTER OUTPUT '..m.key..' actual='..tostring(uid)..'/'..tostring(k)..'; item preserved; check template Species gene')
+          return
+        end
+        if owner~=currentID then return end
+        older=false -- Match actual bee identity before reservation order.
+      end
+    end
+    if older then return end -- Ambiguous outputs still use saved operation order.
     local lo,hi=outputSlots(kind)
     if not op.capture then
       for slot=lo,hi do
