@@ -1,4 +1,4 @@
--- OpenBeekeeper 0.15.2: unattended bee genetics with exact database references.
+-- OpenBeekeeper 0.15.3: unattended bee genetics with exact database references.
 local component = require("component")
 local print=print -- Dashboard captures only this program, never global shell output.
 local dashboard
@@ -748,6 +748,7 @@ local climateDefaults = {
   ["forestry.speciesVengeful"]={"NORMAL","NORMAL"},
   ["forestry.speciesVindictive"]={"NORMAL","NORMAL"},
   ["forestry.speciesWintry"]={"ICY","NORMAL"},
+  ["gendustry.bee.black"]={"NORMAL","NORMAL"},
   ["gendustry.bee.blue"]={"NORMAL","NORMAL"},
   ["gendustry.bee.brown"]={"NORMAL","NORMAL"},
   ["gendustry.bee.cyan"]={"NORMAL","NORMAL"},
@@ -907,7 +908,7 @@ local function newDashboard()
   end
   assert(w>=60 and h>=18,'Dashboard needs at least 60x18 characters')
   local ui={started=computer.uptime(),logs={},input='',offset=0,taskOffset=0,
-    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.15.2'):gsub('%s+$','')}
+    updateText='Updates: press Check update',listeners={},version=(readText('/home/.openbeekeeper/VERSION') or '0.15.3'):gsub('%s+$','')}
   local honey={'   ────         ────    ','  ╱    ╲       ╱    ╲   ',' ╱      ╲─────╱      ╲  ',
     ' ╲      ╱     ╲      ╱  ','  ╲    ╱       ╲    ╱   ','   ────         ────    '}
   local oldFG,oldBG=gpu.getForeground(),gpu.getBackground()
